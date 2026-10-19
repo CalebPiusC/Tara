@@ -1,0 +1,3 @@
+# ADR-0002: Cascaded pipeline vs speech-to-speech
+**Status:** Proposed
+**Context:** Gemini Live API (S6) offers speech in/out with barge-in; OpenAI Realtime shows the same pattern (S13). **Problem:** which to build on. **Options:** (a) VAD→Whisper→Gemini text→Kokoro; (b) Gemini Live; (c) hybrid. **Decision:** (a) default. **Reasons:** need auditable attributed transcripts, policy gating before speech, local STT/TTS, model swap. **Consequences:** higher latency risk; more components. **Risks:** may miss latency budget (Q9). **Evidence:** docs only, no measurements. **Validation:** measure (a); spike (b) behind `LanguageModelProvider` or a separate pipeline if (a) fails.

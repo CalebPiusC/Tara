@@ -1,0 +1,3 @@
+# ADR-0003: Meeting integration strategy
+**Status:** Proposed
+**Context:** Media API is preview and closed to signup, receive-only as documented (S1,S2). **Options:** Media API; browser participant + virtual devices; vendor bot; local adapter. **Decision:** develop on local adapter; PoC browser participant; spike vendor bot; adapter interface declares capabilities. **Reasons:** only routes that plausibly both hear and speak. **Consequences:** unofficial path, ToS and fragility risk. **Risks:** mixed audio only; echo. **Evidence:** [GOOGLE_MEET_OPTIONS](../research/GOOGLE_MEET_OPTIONS.md). **Validation:** Phase 0 spike.

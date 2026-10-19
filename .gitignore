@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+models/
+*.gguf
+*.safetensors
+*.onnx
+*.wav
+*.mp3
+data/
+.DS_Store

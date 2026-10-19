@@ -1,0 +1,2 @@
+# Data Model (proposed)
+Entities: `Meeting`, `MeetingConfig(version)`, `Participant`, `MappingVersion`, `Utterance{id,start,end,text,attribution}`, `Proposal{epoch,trigger,state}`, `SpeechRecord{state,delivered_ms}`, `EvidenceItem{candidate_id,utterance_ids,criterion,kind:observation|interpretation}`, `Decision/ActionItem`, `Report(version, supersedes)`, `AuditEvent`. Append-only event log is the source of truth; reports are derived and regenerable. Storage: SQLite initially (proposed). Raw audio: not stored by default.
