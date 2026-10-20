@@ -8,8 +8,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import (AppPolicy, Issue, MeetingConfig, Mode, ParticipantSpec, Role,
-                     SpeakingPolicy, ToolSpec, ValidationResult, validate)
+from .config import (
+    AppPolicy,
+    Issue,
+    MeetingConfig,
+    Mode,
+    ParticipantSpec,
+    Role,
+    SpeakingPolicy,
+    ToolSpec,
+    ValidationResult,
+    validate,
+)
 from .contracts import LanguageModelProvider, LlmRequest
 from .errors import MalformedOutput
 
@@ -36,6 +46,7 @@ DRAFT_SCHEMA: dict[str, Any] = {
         "approved_knowledge_ids": {"type": "array", "items": {"type": "string"}},
         "no_commitments": {"type": "array", "items": {"type": "string"}},
         "disclosure_text": {"type": "string"},
+        "behaviour_profile": {"type": "string", "enum": ["professional", "conversational", "expressive"]},
         "rejected_instructions": {"type": "array", "items": {"type": "string"}},
         "ambiguities": {"type": "array", "items": {"type": "string"}},
     },
@@ -83,6 +94,7 @@ def parse_draft(d: Any) -> tuple[MeetingConfig, list[str], list[str]]:
         attribution_min_confidence=float(conf) if conf is not None else None,
         individual_reports=bool(d.get("individual_reports", False)), tools=tuple(tools),
         disclosure_text=str(d.get("disclosure_text") or ""), retain_audio=False,
+        behaviour_profile=str(d.get("behaviour_profile") or ""),
         approved_knowledge_ids=tuple(map(str, d.get("approved_knowledge_ids") or ())),
         no_commitments=tuple(map(str, d.get("no_commitments") or ())),
     )

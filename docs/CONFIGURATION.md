@@ -13,3 +13,6 @@ Status: Proposed. Environment variables (placeholders only in `.env.example`):
 | `TARA_DATA_DIR`, `TARA_RETAIN_*` | storage and retention |
 | `PYTORCH_ENABLE_MPS_FALLBACK=1` | Kokoro on Apple Silicon (S8) |
 Thresholds (attribution, end-of-turn, proactive) are config with documented "calibrate" notes, not constants. Meeting behavior lives in `MeetingConfig` ([MEETING_CONTEXT_MODEL.md](MEETING_CONTEXT_MODEL.md)).
+
+## Gemini Live (primary voice engine, 2026-10-20)
+All read by `RuntimeSettings.from_env` (`src/tara/settings.py`); see [GEMINI_LIVE](GEMINI_LIVE.md) for meanings. `GEMINI_API_KEY` and `TARA_LIVE_MODEL` are required when `TARA_LIVE_ENABLED=1`; there is deliberately no default model id. The `TARA_STT_*`, `TARA_TTS_*`, `TARA_LOCAL_LLM_*` and `TARA_MODELS_DIR` variables belong to the dormant local path and can stay unset.

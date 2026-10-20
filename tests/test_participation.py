@@ -1,6 +1,8 @@
 from helpers import ROLES, TH, cfg, group_cfg, ready_rt, utt
+
 from tara.config import Mode, SpeakingPolicy
-from tara.participation import Action, Intent, IntentKind as K, decide
+from tara.participation import Action, Intent, decide
+from tara.participation import IntentKind as K
 from tara.runtime import State
 
 

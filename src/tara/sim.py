@@ -7,7 +7,15 @@ from dataclasses import dataclass, field
 
 from .config import MeetingConfig, Role
 from .evidence import EvidenceStore
-from .participation import Action, Decision, Intent, IntentKind, Thresholds, Utterance, decide
+from .participation import (
+    Action,
+    Decision,
+    Intent,
+    IntentKind,
+    Thresholds,
+    Utterance,
+    decide,
+)
 from .runtime import MeetingRuntime, Proposal, State
 
 

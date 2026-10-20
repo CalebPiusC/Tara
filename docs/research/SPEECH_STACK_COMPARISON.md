@@ -1,5 +1,7 @@
 # Speech Stack Comparison (STT, VAD, TTS)
 
+> **Superseded 2026-10-20 as the primary path.** Gemini Live is now the voice engine ([GEMINI_LIVE](../GEMINI_LIVE.md)). This document describes the optional, dormant local-model path: nothing here is downloaded, installed or started.
+
 Accessed 2026-10-19; see [SOURCES.md](SOURCES.md). "Unknown" = not established by a fetched source.
 
 ## STT

@@ -1,5 +1,7 @@
 # Model Selection (proposed, not final)
 
+> **Superseded 2026-10-20 as the primary path.** Gemini Live is now the voice engine ([GEMINI_LIVE](../GEMINI_LIVE.md)). This document describes the optional, dormant local-model path: nothing here is downloaded, installed or started.
+
 | Role | First choice | Fallback | Status | Disk/RAM |
 |---|---|---|---|---|
 | Reasoning | Gemini Flash, id from config (`TARA_LLM_MODEL`). On 2026-10-19 the models page listed `gemini-3.8-flash` and `gemini-3.6-flash` as stable (S5) | Other listed Flash id; Live API (`gemini-3.8-live`) evaluated for ADR-0002 | Proposed | n/a (cloud) |

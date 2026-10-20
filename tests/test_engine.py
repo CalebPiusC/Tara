@@ -1,21 +1,23 @@
 """Async end-to-end tests of MeetingEngine with fakes + LocalMeetingAdapter.
 They prove orchestration/policy only; no real audio models or Meet."""
 import asyncio
+
 import pytest
 from helpers import ROLES, TH, cfg, group_cfg
+
 from tara import events as E
 from tara.adapters.local import LocalMeetingAdapter
-from tara.audio import EnergyVad, Segmenter, tone, silence
+from tara.audio import EnergyVad, Segmenter, silence, tone
 from tara.classify import RuleIntentClassifier
-from tara.config import Mode, Role
-from tara.contracts import MeetingEvent, MeetingEventKind as MK, PCMChunk
+from tara.config import Mode
+from tara.contracts import MeetingEvent, Passage, PCMChunk
+from tara.contracts import MeetingEventKind as MK
 from tara.conversation import CLARIFY_SPEAKER, UNKNOWN_LINE, ConversationEngine
 from tara.engine import EngineParams, MeetingEngine
 from tara.errors import ProviderTimeout
 from tara.fakes import FailingLLM, FakeLLMProvider, FakeStt, FakeTts
 from tara.identity import LabelMap, ParticipantRegistry, SpeakerAttributor
 from tara.knowledge import InMemoryKnowledge
-from tara.contracts import Passage
 from tara.participation import Attribution, Utterance
 from tara.runtime import State
 

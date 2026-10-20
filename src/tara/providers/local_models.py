@@ -4,10 +4,12 @@ and benchmark each one (docs/LOCAL_DEVELOPMENT.md)."""
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from ..contracts import AudioSegment, PCMChunk, Transcript
 from ..errors import ProviderError
+from ..models import Health, ModelState
 
 
 def _need(module: str, hint: str) -> Any:
@@ -24,6 +26,14 @@ class MlxWhisperRecognizer:
         if not model_repo:
             raise ValueError("TARA_STT_MODEL is empty")
         self.model_repo = model_repo
+        self._used = False
+
+    def health(self) -> Health:
+        """mlx-whisper loads inside its first call, so state is UNLOADED until first use."""
+        return Health("stt", ModelState.READY if self._used else ModelState.UNLOADED, self.model_repo)
+
+    async def close(self) -> None:
+        self._used = False   # the library keeps its own cache; nothing to release explicitly
 
     def _run(self, seg: AudioSegment) -> dict[str, Any]:
         mlx_whisper = _need("mlx_whisper", "Install in Phase 2: pip install mlx-whisper (needs ffmpeg).")
@@ -35,6 +45,7 @@ class MlxWhisperRecognizer:
 
     async def transcribe(self, seg: AudioSegment) -> Transcript:
         out = await asyncio.to_thread(self._run, seg)
+        self._used = True
         return Transcript(str(out.get("text", "")).strip(), seg.start_ms, seg.end_ms, None, out.get("language"))
 
 
@@ -48,6 +59,12 @@ class KokoroSynthesizer:
             raise ValueError("TARA_TTS_VOICE is empty")
         self.voice, self.lang_code = voice, lang_code
         self._pipe: Any = None
+
+    def health(self) -> Health:
+        return Health("tts", ModelState.READY if self._pipe is not None else ModelState.UNLOADED, self.voice)
+
+    async def close(self) -> None:
+        self._pipe = None   # drop the pipeline so memory can be reclaimed
 
     def _pipeline(self) -> Any:
         if self._pipe is None:

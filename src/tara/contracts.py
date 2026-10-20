@@ -4,9 +4,10 @@ Logical boundaries inside one process; nothing here implies separate services.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Callable, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 T = TypeVar("T")
 
@@ -99,6 +100,18 @@ class AdapterCapabilities:
     send_audio: bool = True
     send_video: bool = False
     delivery_confirmation: bool = False
+    can_mute_self: bool = False       # platform-level microphone mute of Tara herself
+    can_camera: bool = False
+    can_show_image: bool = False      # display a still picture as Tara's identity
+    can_mute_others: bool = False     # never enabled by default; needs explicit meeting config too
+
+
+@dataclass(frozen=True)
+class ActionOutcome:
+    """Result of a platform action (mute, camera, picture). `ok=False` is reported, never assumed away."""
+
+    ok: bool
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,6 +155,7 @@ class ToolResult:
     output: Any = None
     error: str | None = None
     pending_approval: bool = False
+    untrusted: bool = True   # tool output is data, never instructions
 
 
 # ---- protocols -------------------------------------------------------------

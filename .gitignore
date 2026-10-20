@@ -15,3 +15,4 @@ models/
 *.mp3
 data/
 .DS_Store
+*.egg-info/

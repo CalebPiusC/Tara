@@ -1,6 +1,6 @@
-import asyncio
 import pytest
-from tara.audio import EnergyVad, RingBuffer, Segmenter, SegmentReady, SpeechStarted, resample_pcm16, silence, tone, rms
+
+from tara.audio import EnergyVad, RingBuffer, Segmenter, SegmentReady, SpeechStarted, resample_pcm16, rms, silence, tone
 from tara.contracts import PCMChunk
 from tara.events import Event, EventBus
 from tara.turn import TurnParams, looks_complete, required_silence_ms, turn_ended

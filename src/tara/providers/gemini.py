@@ -13,10 +13,12 @@ import json
 import random
 import urllib.error
 import urllib.request
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from ..contracts import LlmRequest
 from ..errors import MalformedOutput, ProviderError, ProviderTimeout
+from ..models import Health, ModelState
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 RETRYABLE = {429, 500, 502, 503, 504}
@@ -27,7 +29,7 @@ Transport = Callable[[str, dict[str, str], bytes, float], tuple[int, bytes]]
 def _urllib_transport(url: str, headers: dict[str, str], body: bytes, timeout: float) -> tuple[int, bytes]:
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - fixed https host
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -66,6 +68,13 @@ class GeminiProvider:
         self._transport = transport or _urllib_transport
         self.backoff_s, self.grace_s = backoff_s, grace_s
 
+    def health(self) -> Health:
+        """Configuration-level only: the API has not been contacted."""
+        return Health("cloud_llm", ModelState.READY, "configured; not contacted")
+
+    async def close(self) -> None:
+        return None   # no persistent connection is held
+
     def __repr__(self) -> str:  # never leak the key
         return f"GeminiProvider(model={self.model!r})"
 
@@ -77,7 +86,7 @@ class GeminiProvider:
             try:
                 status, raw = await asyncio.wait_for(
                     asyncio.to_thread(self._transport, url, headers, data, self.timeout_s), self.timeout_s + self.grace_s)
-            except (asyncio.TimeoutError, TimeoutError) as e:
+            except TimeoutError as e:
                 err: ProviderError = ProviderTimeout("gemini timeout")
                 err.__cause__ = e
             except OSError as e:

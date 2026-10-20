@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_TRAILING_OPEN = re.compile(r"\b(and|but|or|so|because|um+|uh+|like|the|a|an|to|of|with|that|which|then|if|when)\s*[,.…]*$", re.I)
+_TRAILING_OPEN = re.compile(r"\b(and|but|or|so|because|um+|uh+|like|the|a|an|to|of|with|that|which|then|if|when)\s*[,.…]*$", re.IGNORECASE)
 _FILLER_END = re.compile(r"(\.\.\.|…|,)\s*$")
 
 

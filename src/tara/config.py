@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 SCHEMA = "tara.meeting_config/v0"
+KIND_NAMES = frozenset({"casual", "technical", "interview", "client", "incident", "brainstorm"})   # mirrors behaviour.meeting_kind (tested)
+COMMAND_NAMES = frozenset({"mic_mute", "listen_only", "resume", "leave", "camera_on", "camera_off", "show_identity", "notes_on", "notes_off", "confirm_note", "mute_other"})   # mirrors control.commands (tested)
+PROFILE_NAMES = frozenset({"professional", "conversational", "expressive"})   # mirrors behaviour.profiles.Profile (tested)
 
 
 class Mode(str, Enum):
@@ -70,6 +73,10 @@ class MeetingConfig:
     individual_reports: bool = False
     tools: tuple[ToolSpec, ...] = ()
     disclosure_text: str = ""
+    send_transcript_to_llm: bool = True  # False forbids cloud escalation
+    behaviour_profile: str = ""          # "" = use the runtime default; style only, never permissions
+    meeting_kind: str = ""               # "" = infer from the conversation; otherwise an explicit override (style only)
+    allowed_commands: tuple[str, ...] = ()  # spoken-command allow-list; empty = defaults (everything except mute_other)
     retain_audio: bool = False
     approved_knowledge_ids: tuple[str, ...] = ()
     no_commitments: tuple[str, ...] = ()
@@ -153,6 +160,17 @@ def validate(cfg: MeetingConfig, policy: AppPolicy) -> ValidationResult:
     if cfg.mode in INTERVIEW_MODES and cfg.policy is SpeakingPolicy.PROACTIVE_ALLOWED:
         err("policy", "proactive speech contradicts interview turn rules")
 
+    if cfg.behaviour_profile and cfg.behaviour_profile not in PROFILE_NAMES:
+        err("behaviour_profile", f"unknown profile {cfg.behaviour_profile!r}; choose from {sorted(PROFILE_NAMES)}")
+    elif cfg.behaviour_profile and cfg.behaviour_profile != "professional" and cfg.mode in INTERVIEW_MODES:
+        warn("behaviour_profile", "interviews always use the professional profile; the requested one is ignored")
+    if cfg.meeting_kind and cfg.meeting_kind not in KIND_NAMES:
+        err("meeting_kind", f"unknown kind {cfg.meeting_kind!r}; choose from {sorted(KIND_NAMES)}")
+    bad_cmds = [c for c in cfg.allowed_commands if c not in COMMAND_NAMES]
+    if bad_cmds:
+        err("allowed_commands", f"unknown commands {bad_cmds}")
+    if "mute_other" in cfg.allowed_commands:
+        warn("allowed_commands", "mute_other also needs a platform adapter that supports muting others; it is off by default")
     if cfg.retain_audio and not policy.allow_audio_retention:
         err("retain_audio", "audio retention not permitted by app policy")
 

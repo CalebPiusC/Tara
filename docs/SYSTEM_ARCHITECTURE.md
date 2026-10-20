@@ -1,5 +1,7 @@
 # System Architecture
 
+> **2026-10-20:** the diagram below is the original conceptual (cascaded) design. The implemented primary voice path is Gemini Live behind provider interfaces: see [GEMINI_LIVE](GEMINI_LIVE.md) for the architecture as built.
+
 **Status: Proposed (Designed, not implemented).** Single Python process (modular monolith) with async I/O and a small worker pool for CPU-bound inference. No microservices ([ADR-0001](adr/0001-modular-monolith.md)).
 
 ```mermaid
@@ -74,6 +76,9 @@ Solid = data flow; dotted = control/optional. Labeled planned/future components 
 
 ## Hybrid consequences
 Gemini needs internet; transcripts (and any audio sent) leave the machine; local inference competes for 24 GB unified memory and thermal budget; API key must be protected. See [SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md).
+
+## Runtime foundation
+Routing, escalation, typed state, model lifecycle, tools and metrics as implemented are in [RUNTIME_FOUNDATION](RUNTIME_FOUNDATION.md); that document is authoritative where it differs from the conceptual diagram above.
 
 ## Memory and retrieval
 Live state, working memory, episodic meeting memory, a Postgres+pgvector knowledge store, retrieval, context assembly and consolidation are specified in [MEMORY_AND_RAG](MEMORY_AND_RAG.md). In the diagram above "KnowledgeProvider" and "Persistence" stand for that design; only an in-memory keyword provider exists today.

@@ -1,5 +1,7 @@
 # Audio Pipeline
 
+> **2026-10-20:** with Gemini Live, STT/TTS stages are inside the provider; this pipeline still describes buffering, cancellation, feedback and staleness rules, which apply to the Live path (see [GEMINI_LIVE](GEMINI_LIVE.md)). The cascaded stages are the dormant local path.
+
 **Status: Designed, not implemented.** Numbers marked **[benchmark]** are intentionally unspecified.
 
 | # | Stage | Notes |

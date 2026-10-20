@@ -1,6 +1,9 @@
 import asyncio
 import json
+import time
+
 import pytest
+
 from tara.contracts import LlmRequest
 from tara.errors import MalformedOutput, ProviderError, ProviderTimeout
 from tara.providers.gemini import GeminiProvider, build_body, extract_text
@@ -67,7 +70,8 @@ def test_network_error_and_timeout_mapping():
         run(prov(T(OSError("down")), max_retries=0).generate(REQ, lambda d: d, {}))
 
     def slow(url, headers, body, timeout):
-        import time; time.sleep(0.3); return ok("{}")
+        time.sleep(0.3)
+        return ok("{}")
     p = GeminiProvider(SECRET, "m", timeout_s=0.01, grace_s=0.0, max_retries=0, transport=slow, backoff_s=0.0)
     with pytest.raises(ProviderTimeout):
         run(p.generate(REQ, lambda d: d, {}))

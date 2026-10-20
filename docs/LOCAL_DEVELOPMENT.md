@@ -1,24 +1,32 @@
 # Local Development (Apple Silicon, M4 Pro / 24 GB)
 
-**Honest status:** the repository has no code, no `pyproject.toml`, no tests. Steps marked *(planned)* do not work yet. Facts about this machine on 2026-10-19: system `python3` is **3.9.6** (too old for planning purposes: use 3.11+, exact version to be pinned when `pyproject.toml` exists), Homebrew and `ffmpeg` present, `uv` not installed.
+**Updated 2026-10-21: no local model is downloaded or needed.** Gemini Live is the voice engine ([GEMINI_LIVE](GEMINI_LIVE.md)); this machine only runs Python, the tests and the audio plumbing. The previous staged plan for downloading Whisper, Qwen and Kokoro was removed. A local microphone/speaker demo now exists, but it has not yet been run on real hardware in this repo.
 
-## Stage A – tooling (planned)
+## Setup
 ```bash
-brew install python@3.12 uv      # then verify: python3.12 --version
+python3.13 -m venv .venv                       # system python3 is 3.9.6; 3.13 comes from Homebrew
+.venv/bin/pip install -e ".[dev,live,audio]"   # dev tools, the google-genai SDK and sounddevice (no models)
+.venv/bin/python -m pytest -q                  # offline: no network, no key, no models
+.venv/bin/ruff check src tests
+.venv/bin/mypy src
 ```
-Phase 1 install: Python 3.13 is already present via Homebrew on this machine; `python3.13 -m venv .venv && .venv/bin/pip install pytest`; `pyproject.toml` requires >=3.11.
-
-## Stage B – Gemini key (planned)
-Create a key in Google AI Studio; put it in a git-ignored `.env` (copy from `.env.example`). Never paste it in chat, logs, or code. Set `TARA_LLM_MODEL` after checking the models page.
-
-## Stage C – models (do NOT run until Phase 2 starts)
-Why each: STT (Whisper family), VAD (Silero ~2 MB, S11), TTS (Kokoro 82M, needs `espeak-ng` via `brew install espeak-ng`, S8). Exact download commands and sizes are recorded when each integration is built; disk sizes are currently **unknown**. Verify: tiny script transcribing a known WAV / synthesizing a sentence. Benchmark: record wall time, peak RSS (`/usr/bin/time -l`), and real-time factor; write results to `docs/research/BENCHMARKS.md` (does not exist yet). Disable/replace: change `TARA_STT_BACKEND` etc. If too slow: smaller Whisper checkpoint, faster-whisper CPU int8, or cloud STT.
-
-## Stage D – live audio (planned)
-Grant microphone permission to the terminal app; list devices; record 5 s; transcribe; synthesize and play back.
-
-## Stage E – meeting adapter (planned)
-Virtual audio device (e.g. BlackHole) + Chrome automation for the PoC adapter; unverified. See [research/GOOGLE_MEET_OPTIONS.md](research/GOOGLE_MEET_OPTIONS.md).
-
-## Test tiers (planned) `pytest -m offline` · `-m local_model` · `-m live_api`.
-Common errors to watch: Kokoro needs `espeak-ng`; MPS ops fall back without `PYTORCH_ENABLE_MPS_FALLBACK=1`; pyannote weights require accepting terms and a Hugging Face token (S12).
+## Gemini key (only for the opt-in real-API checks)
+Create a key in Google AI Studio and keep it in a git-ignored `.env`. The code reads environment variables only: `set -a; source .env; set +a`. Never paste the key into chat, code, logs or commits. Required for real runs: `GEMINI_API_KEY`, `TARA_LIVE_MODEL` (pick an id from the models page; ids change).
+## Real-session checks
+```bash
+.venv/bin/python -m tara.voice.smoke                                   # real call, prints measurements only
+TARA_LIVE_TEST=1 .venv/bin/python -m pytest -m live_api tests/live -q  # same check as an opt-in test
+```
+## Local voice demo (microphone in, voice out)
+```bash
+set -a; source .env; set +a
+.venv/bin/python -m tara.voice.demo --one-on-one            # headphones: replies to any speech
+.venv/bin/python -m tara.voice.demo --one-on-one --speaker  # speakers: no echo, barge-in disabled
+.venv/bin/python -m tara.voice.demo                         # meeting rule: "Tara, ..."
+.venv/bin/python -m tara.voice.demo --profile professional
+```
+Use **headphones** for full duplex. Without them Tara's reply is captured by the microphone and sent back to the model as if it were your speech; `--speaker` avoids that by sending silence while Tara speaks, at the cost of voice barge-in (press `Ctrl+C` to stop). The demo replies in English, uses the default devices, keeps the normal participation gate, and does not touch Google Meet. `--one-on-one` uses the existing `proactive_allowed` policy for a single participant; it is only valid outside interview modes. Without it, say “Tara, …” to address her. Output is resampled from the model's 24 kHz to the output device's default rate. The owner has run the headphone conversation on real hardware; speaker mode and reconnect still need a real-device check. `sounddevice` is an optional `audio` extra; the adapter itself raises a clear `JoinError` if the mic or speakers cannot be opened. Add `--debug` to print non-content counters (captured chunks, input transcripts, response audio, gate outcomes, send/playback errors) without printing speech or transcripts; the same summary prints when the demo exits.
+## Not available yet
+Google Meet transport (see [research/PHASE0_MEET_SPIKE.md](research/PHASE0_MEET_SPIKE.md)). Optional dormant local-model adapters exist in `src/tara/providers/` but nothing installs or starts them; do not download models unless the owner decides to revive that path.
+## Common errors
+`config errors: GEMINI_API_KEY ...` means the environment is not loaded; `ProviderTimeout: live connect timed out` means network or model id; a `Fatal` provider error with code 401/403/404 means a bad key or unknown model (not retried). `audio error: could not open the microphone/speakers` means the default device is missing, busy, or does not support the requested rate (16 kHz input; output uses the device default rate, resampled from 24 kHz).

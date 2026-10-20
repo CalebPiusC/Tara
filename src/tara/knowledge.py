@@ -7,7 +7,7 @@ import re
 from .contracts import Passage
 
 _WORD = re.compile(r"[a-z0-9]+")
-_STOP = frozenset("a an the is are of to and or in on for with do does it what how can you your we our i".split())
+_STOP = frozenset(["a", "an", "the", "is", "are", "of", "to", "and", "or", "in", "on", "for", "with", "do", "does", "it", "what", "how", "can", "you", "your", "we", "our", "i"])
 
 
 def _tokens(s: str) -> set[str]:

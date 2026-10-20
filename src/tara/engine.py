@@ -11,25 +11,64 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Callable
 
 from . import events as ev
 from .audio import Segmenter, SegmentReady, SpeechStarted, resample_pcm16
 from .classify import IntentClassifier
 from .config import MeetingConfig, Role
-from .contracts import (AudioSegment, MeetingAdapter, MeetingEvent, MeetingEventKind, MeetingTarget,
-                        PCMChunk, SpeakerHint, SpeechRecognizer, SpeechSynthesizer, HintKind)
-from .conversation import CLARIFY_SPEAKER, ConversationEngine, RuntimeView, TranscriptLine
-from .errors import ProviderError
+from .contracts import (
+    AudioSegment,
+    AvatarProvider,
+    HintKind,
+    MeetingAdapter,
+    MeetingEvent,
+    MeetingEventKind,
+    MeetingTarget,
+    NullAvatarProvider,
+    PCMChunk,
+    SpeakerHint,
+    SpeechRecognizer,
+    SpeechSynthesizer,
+)
+from .conversation import (
+    CLARIFY_SPEAKER,
+    RuntimeView,
+    TranscriptLine,
+)
+from .errors import InvalidStateChange, ProviderError
 from .identity import ParticipantRegistry, SpeakerAttributor
 from .interview import InterviewEngine
-from .participation import Action, Attribution, Decision, IntentKind, Thresholds, Utterance, decide
+from .metrics import AUDIO, STT, TOTAL, TTS_FIRST, Metrics
+from .participation import (
+    Action,
+    Attribution,
+    Decision,
+    IntentKind,
+    Thresholds,
+    Utterance,
+    decide,
+)
 from .reports import MeetingLog
+from .respond import Responder
 from .runtime import MeetingRuntime, Proposal, State
+from .state import (
+    ActiveQuestion,
+    ControlChanged,
+    ConversationState,
+    Interrupted,
+    QuestionAsked,
+    ResponseEnded,
+    ResponseStage,
+    ResponseStarted,
+    SpeakingChanged,
+    StateEvent,
+    UtteranceAdded,
+    UtteranceRecord,
+)
 from .tools import ToolExecutor
-from .contracts import NullAvatarProvider, AvatarProvider
 
 REFUSE_LINE = "That's outside what I can help with in this meeting."
 
@@ -53,12 +92,13 @@ class EngineParams:
 class MeetingEngine:
     def __init__(self, *, cfg: MeetingConfig, roles: dict[str, Role], names: dict[str, str],
                  adapter: MeetingAdapter, stt: SpeechRecognizer, tts: SpeechSynthesizer,
-                 classifier: IntentClassifier, conversation: ConversationEngine, thresholds: Thresholds,
+                 classifier: IntentClassifier, conversation: Responder, thresholds: Thresholds,
                  registry: ParticipantRegistry, attributor: SpeakerAttributor,
                  segmenter_factory: Callable[[str], Segmenter],
                  bus: ev.EventBus | None = None, clock: Callable[[], int] | None = None,
                  interview: InterviewEngine | None = None, tools: ToolExecutor | None = None,
-                 avatar: AvatarProvider | None = None, params: EngineParams | None = None):
+                 avatar: AvatarProvider | None = None, params: EngineParams | None = None,
+                 metrics: Metrics | None = None, meeting_id: str = "local"):
         self.cfg, self.roles, self.names = cfg, roles, names
         self.adapter, self.stt, self.tts = adapter, stt, tts
         self.classifier, self.conversation, self.th = classifier, conversation, thresholds
@@ -71,6 +111,11 @@ class MeetingEngine:
         self.p = params or EngineParams()
         self.rt = MeetingRuntime(self.p.max_proposal_age_ms, policy_silent=cfg.policy.value == "silent")
         self.log = MeetingLog()
+        self.metrics = metrics or Metrics()
+        self.state = ConversationState(meeting_id=meeting_id, mode=cfg.mode.value)
+        self._arrival: dict[str, int] = {}
+        if hasattr(conversation, "bind_stage"):
+            conversation.bind_stage(self._stage)
         self.lines: deque[TranscriptLine] = deque(maxlen=self.p.history_limit)
         self.spoken: list[dict] = []
         self._segmenters: dict[str, Segmenter] = {}
@@ -91,6 +136,17 @@ class MeetingEngine:
     # ---- lifecycle --------------------------------------------------------
     def _emit(self, name: str, **data) -> None:
         self.bus.publish(ev.Event(name, self.clock(), self.rt.epoch, data))
+
+    def _st(self, e: StateEvent) -> None:
+        """Apply a conversation-state event. A rejected change is reported, never fatal to the meeting."""
+        try:
+            self.state.apply(e)
+        except InvalidStateChange as exc:
+            self.metrics.inc("state_invalid")
+            self._emit("state.invalid", event=type(e).__name__, error=str(exc)[:80])
+
+    def _stage(self, stage: str, route: str | None) -> None:
+        self._st(ResponseStage(stage, route))
 
     def _go(self, s: State) -> None:
         self.rt.transition(s)
@@ -172,10 +228,12 @@ class MeetingEngine:
             self._emit("audio.invalid", stream=chunk.stream_id)
             return
         seg = self._segmenters.setdefault(chunk.stream_id, self._seg_factory(chunk.stream_id))
-        if chunk.sample_rate != seg.vad.sample_rate:
-            chunk = PCMChunk(resample_pcm16(chunk.data, chunk.sample_rate, seg.vad.sample_rate),
-                             seg.vad.sample_rate, chunk.ts_ms, chunk.stream_id)
-        for out in seg.feed(chunk):
+        with self.metrics.time(AUDIO):
+            if chunk.sample_rate != seg.vad.sample_rate:
+                chunk = PCMChunk(resample_pcm16(chunk.data, chunk.sample_rate, seg.vad.sample_rate),
+                                 seg.vad.sample_rate, chunk.ts_ms, chunk.stream_id)
+            outs = seg.feed(chunk)
+        for out in outs:
             if isinstance(out, SpeechStarted):
                 await self._on_speech_started(out)
             elif isinstance(out, SegmentReady):
@@ -224,8 +282,10 @@ class MeetingEngine:
 
     async def process_segment(self, seg: AudioSegment, overlap: bool = False) -> None:
         try:
-            tr = await asyncio.wait_for(self.stt.transcribe(seg), self.p.stt_timeout_s)
-        except (ProviderError, asyncio.TimeoutError):
+            with self.metrics.time(STT):
+                tr = await asyncio.wait_for(self.stt.transcribe(seg), self.p.stt_timeout_s)
+        except (TimeoutError, ProviderError):
+            self.metrics.inc("inference_failures")
             self._emit("transcript.failed", start_ms=seg.start_ms)
             self._resume_if_interrupted()
             return
@@ -261,11 +321,19 @@ class MeetingEngine:
             return
         who = self.names.get(u.attribution.participant_id or "", None)
         self.lines.append(TranscriptLine(who, u.attribution.confidence, u.text))
+        self._arrival[u.event_id] = self.clock()
+        while len(self._arrival) > 64:
+            self._arrival.pop(next(iter(self._arrival)))
+        self._st(UtteranceAdded(UtteranceRecord(u.event_id, u.attribution.participant_id, who,
+                                                u.attribution.confidence, u.text, self.clock(), u.attribution.overlap)))
         self._emit(ev.TRANSCRIPT_FINAL, event=u.event_id, text_len=len(u.text))
         if self.interview is not None:
             self.interview.record_answer(u)
         ctx = [f"{ln.speaker or 'unknown'}: {ln.text}" for ln in list(self.lines)[-6:]]
-        intent = await self.classifier.classify(u.text, ctx)   # slow, outside the lock; state is read AFTER it
+        with self.metrics.time("classify_ms"):
+            intent = await self.classifier.classify(u.text, ctx)   # slow, outside the lock; state is read AFTER it
+        if intent.is_direct_question and intent.kind in (IntentKind.ADDRESSED, IntentKind.INSTRUCTION, IntentKind.INVITATION):
+            self._st(QuestionAsked(ActiveQuestion(u.event_id, u.text, u.attribution.participant_id, u.attribution.confidence)))
 
         async with self._lock:
             if self.rt.state is State.STOPPED:
@@ -324,19 +392,30 @@ class MeetingEngine:
     # ---- generation + playback ---------------------------------------------------
     def _start(self, u: Utterance, fixed: str | None) -> None:
         self._go(State.GENERATING)
+        self._st(ResponseStarted(u.event_id, self.rt.epoch))
+        self._st(ResponseStage("generating"))
         self._task = asyncio.create_task(self._respond(u, fixed, self.rt.epoch, self.clock()))
+        self.metrics.gauge("active_tasks", 1)
 
     async def _respond(self, u: Utterance, fixed: str | None, epoch: int, created: int) -> None:
         """Task boundary: any unexpected failure ends in silence + LISTENING, never a wedged state."""
+        outcome = "failed"
         try:
             await self._respond_inner(u, fixed, epoch, created)
+            rec = next((r for r in reversed(self.spoken) if r["trigger"] == u.event_id), None)
+            outcome = "completed" if rec and rec["outcome"] == "completed" else "failed"
         except asyncio.CancelledError:
+            outcome = "cancelled"
             raise
         except Exception as exc:   # noqa: BLE001 - deliberate last-resort boundary, reported not swallowed
+            self.metrics.inc("inference_failures")
             self._emit(ev.PROPOSAL_REJECTED, event=u.event_id, reason=f"internal:{type(exc).__name__}")
             if self.rt.epoch == epoch and self.rt.state in (State.GENERATING, State.VALIDATING, State.WAITING_TO_SPEAK, State.SPEAKING):
                 self.rt.state = State.LISTENING   # bypass table on purpose: recovery from an internal error
                 self._emit(ev.STATE_CHANGED, state="LISTENING")
+        finally:
+            self._st(ResponseEnded(u.event_id, outcome))
+            self.metrics.gauge("active_tasks", 0)
 
     async def _respond_inner(self, u: Utterance, fixed: str | None, epoch: int, created: int) -> None:
         text: str | None = fixed
@@ -344,12 +423,13 @@ class MeetingEngine:
         try:
             if text is None:
                 q = self.interview.current_question if self.interview else None
-                view = RuntimeView(list(self.lines), q.text if q else None)
+                view = RuntimeView(list(self.lines), q.text if q else None, summary=self.state.summary, topic=self.state.topic)
                 v = await asyncio.wait_for(self.conversation.propose(u.text, view), self.p.gen_timeout_s)
                 text, tool = v.text, v.tool
                 if v.unanswered:
                     self.log.unanswered.append(u.text)
-        except (ProviderError, asyncio.TimeoutError) as e:
+        except (TimeoutError, ProviderError) as e:
+            self.metrics.inc("inference_failures")
             self._emit(ev.PROPOSAL_REJECTED, event=u.event_id, reason=type(e).__name__)
             self._abandon(epoch)
             return
@@ -363,10 +443,12 @@ class MeetingEngine:
         prop = Proposal(f"p_{u.event_id}", u.event_id, epoch, created, text)
         self._emit(ev.PROPOSAL_CREATED, event=u.event_id)
         self._go(State.VALIDATING)
+        self._stage("validating", None)
         ok = self.rt.approve(prop, self.clock())
         if not ok.approved and ok.reason == "floor_busy":
             # someone is talking: wait (bounded) for the floor instead of dropping a direct answer
             self._go(State.WAITING_TO_SPEAK)
+            self._stage("waiting", None)
             freed = await self._wait_floor(epoch)
             if not freed or self.rt.state is not State.WAITING_TO_SPEAK or self.rt.epoch != epoch:
                 if self.rt.state is State.WAITING_TO_SPEAK and self.rt.epoch == epoch:
@@ -412,8 +494,13 @@ class MeetingEngine:
         if self.rt.state is not State.WAITING_TO_SPEAK or self.rt.epoch != epoch:
             return
         self._go(State.SPEAKING)
+        self._stage("speaking", None)
+        self._st(SpeakingChanged(True))
+        arrived = self._arrival.pop(trigger, None)
+        if arrived is not None:
+            self.metrics.observe(TOTAL, self.clock() - arrived)
         uid = f"s_{trigger}"
-        rec = {"id": uid, "text": text, "trigger": trigger, "delivered_ms": None, "outcome": "playing"}
+        rec: dict[str, object] = {"id": uid, "text": text, "trigger": trigger, "delivered_ms": None, "outcome": "playing"}
         self.spoken.append(rec)
         self._recent_tts.append((text, self.clock()))
         self._emit(ev.SPEECH_STARTED, utterance=uid)
@@ -421,7 +508,12 @@ class MeetingEngine:
         eng = self
 
         async def chunks():
+            t_start = time.perf_counter()
+            first = True
             async for ch in eng.tts.synthesize(text):
+                if first:
+                    eng.metrics.observe(TTS_FIRST, (time.perf_counter() - t_start) * 1000)
+                    first = False
                 if eng.rt.epoch != epoch:      # per-chunk staleness check
                     return
                 await eng.avatar.on_audio(uid, ch, ch.ts_ms)
@@ -436,7 +528,8 @@ class MeetingEngine:
             await self.avatar.on_interrupt(uid, delivered)
             self._truncate_history(text, delivered)
             raise
-        except (ProviderError, asyncio.TimeoutError, OSError):
+        except (TimeoutError, ProviderError, OSError):
+            self.metrics.inc("inference_failures")
             rec["outcome"] = "failed"
             rec["delivered_ms"] = await self.adapter.stop_audio(uid)   # never assume delivery
             self._emit(ev.SPEECH_FAILED, utterance=uid)
@@ -465,13 +558,21 @@ class MeetingEngine:
         t, self._task = self._task, None
         if t and not t.done() and t is not asyncio.current_task():
             t.cancel()
+            self.metrics.inc("cancellations")
             try:
                 await t
             except asyncio.CancelledError:
                 pass
+            rt_task = self.state.response_task
+            if rt_task is not None:
+                # a task cancelled before its first step never ran its own cleanup
+                self._st(ResponseEnded(rt_task.trigger_event_id, "cancelled"))
+                self.metrics.gauge("active_tasks", 0)
 
     async def _interrupt(self) -> None:
         self.rt.on_barge_in()              # SPEAKING -> INTERRUPTED, epoch++
+        self.metrics.inc("interruptions")
+        self._st(Interrupted())
         await self._cancel_task()
         self._emit(ev.STATE_CHANGED, state="INTERRUPTED")
 
@@ -485,9 +586,12 @@ class MeetingEngine:
     async def _takeover(self) -> None:
         await self._cancel_task()
         self.rt.start_takeover()
+        self._st(ControlChanged(True))
+        self.metrics.inc("takeovers")
         self._deferred = None
         self._emit(ev.TAKEOVER_STARTED)
 
     def release_takeover(self) -> None:
         self.rt.release_takeover()
+        self._st(ControlChanged(False))
         self._emit(ev.TAKEOVER_RELEASED)

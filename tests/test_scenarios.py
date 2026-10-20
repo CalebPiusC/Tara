@@ -1,7 +1,9 @@
 """Scripted simulations (policy logic only; no audio/models/Meet)."""
-from helpers import ROLES, TH, group_cfg, cfg, utt
+from helpers import ROLES, TH, cfg, group_cfg, utt
+
 from tara.config import Role
-from tara.participation import Intent, IntentKind as K
+from tara.participation import Intent
+from tara.participation import IntentKind as K
 from tara.runtime import State
 from tara.sim import FakeLLM, SimMeeting
 

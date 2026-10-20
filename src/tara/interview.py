@@ -5,7 +5,7 @@ assessments may cite only event ids already in that candidate's evidence, so a
 model cannot fabricate a quote or borrow another candidate's."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from .errors import MalformedOutput

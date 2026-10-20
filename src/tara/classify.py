@@ -10,8 +10,8 @@ from .contracts import LanguageModelProvider, LlmRequest
 from .errors import MalformedOutput
 from .participation import Intent, IntentKind
 
-_TAKEOVER = re.compile(r"\b(i'?ll|i will|let me) take (it|over)\b|\bi'?ve got it from here\b|\bthanks,? tara\b.*\b(from here|take over)\b", re.I)
-_SILENCE = re.compile(r"\b(be quiet|stop talking|please hold off|don'?t speak|stay silent|hold on tara)\b", re.I)
+_TAKEOVER = re.compile(r"\b(i'?ll|i will|let me) take (it|over)\b|\bi'?ve got it from here\b|\bthanks,? tara\b.*\b(from here|take over)\b", re.IGNORECASE)
+_SILENCE = re.compile(r"\b(be quiet|stop talking|please hold off|don'?t speak|stay silent|hold on tara)\b", re.IGNORECASE)
 _WORD = re.compile(r"[a-z']+")
 
 
@@ -41,11 +41,11 @@ class RuleIntentClassifier:
         if _TAKEOVER.search(text):
             return Intent(IntentKind.TAKEOVER, 0.8)
         found, idx = name_hint(text, self.names)
-        q = "?" in text or bool(re.match(r"\s*(tara,?\s*)?(can|could|what|how|why|when|do|does|would|will)\b", text, re.I))
+        q = "?" in text or bool(re.match(r"\s*(tara,?\s*)?(can|could|what|how|why|when|do|does|would|will)\b", text, re.IGNORECASE))
         if found:
             if idx <= 1:  # vocative at the start: "Tara, can you ..."
                 return Intent(IntentKind.ADDRESSED, 0.8, is_direct_question=q)
-            if q and re.search(r"\b(you|your)\b", text, re.I):
+            if q and re.search(r"\b(you|your)\b", text, re.IGNORECASE):
                 return Intent(IntentKind.ADDRESSED, 0.55, is_direct_question=True)
             return Intent(IntentKind.ABOUT_TARA, 0.7)
         return Intent(IntentKind.HUMAN_TO_HUMAN, 0.6, is_direct_question=q)

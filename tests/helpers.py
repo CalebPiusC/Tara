@@ -1,5 +1,4 @@
-from tara.config import (AppPolicy, MeetingConfig, Mode, ParticipantSpec, Role,
-                         SpeakingPolicy, ToolSpec)
+from tara.config import AppPolicy, MeetingConfig, Mode, ParticipantSpec, Role, SpeakingPolicy, ToolSpec
 from tara.participation import Attribution, Thresholds, Utterance
 from tara.runtime import MeetingRuntime, State
 

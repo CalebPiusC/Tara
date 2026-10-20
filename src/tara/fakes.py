@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 from .contracts import AudioSegment, LlmRequest, PCMChunk, Transcript
 from .errors import MalformedOutput, ProviderError, ProviderTimeout

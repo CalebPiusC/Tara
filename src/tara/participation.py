@@ -77,6 +77,21 @@ def _role_of(participant_id: str | None, roles: dict[str, Role]) -> Role | None:
     return roles.get(participant_id) if participant_id else None
 
 
+def min_confidence(cfg: MeetingConfig, th: Thresholds) -> float:
+    return cfg.attribution_min_confidence or th.default_attribution
+
+
+def identity_reliable(att: Attribution, min_conf: float) -> bool:
+    """A speaker claim is usable only with an id, enough confidence, and no overlap."""
+    return att.participant_id is not None and att.confidence >= min_conf and not att.overlap
+
+
+def takeover_authorized(cfg: MeetingConfig, att: Attribution, roles: dict[str, Role], min_conf: float) -> bool:
+    """Control intents need a trusted role AND reliable identity (prompt-injection guard)."""
+    return (cfg.takeover_phrases_enabled and identity_reliable(att, min_conf)
+            and _role_of(att.participant_id, roles) in CONTROL_ROLES)
+
+
 def decide(
     utt: Utterance,
     intent: Intent,
@@ -88,16 +103,12 @@ def decide(
     if rt.state in (State.STOPPED, State.RECOVERING, State.INITIALIZING, State.CONNECTING):
         return Decision(Action.DENY, "not_ready")
 
-    min_conf = cfg.attribution_min_confidence or th.default_attribution
-    identity_ok = (
-        utt.attribution.participant_id is not None
-        and utt.attribution.confidence >= min_conf
-        and not utt.attribution.overlap
-    )
+    min_conf = min_confidence(cfg, th)
+    identity_ok = identity_reliable(utt.attribution, min_conf)
 
     # Control intents require a trusted role AND reliable identity (prompt-injection guard).
     if intent.kind is IntentKind.TAKEOVER:
-        if cfg.takeover_phrases_enabled and identity_ok and _role_of(utt.attribution.participant_id, roles) in CONTROL_ROLES:
+        if takeover_authorized(cfg, utt.attribution, roles, min_conf):
             return Decision(Action.TAKEOVER, "takeover_phrase")
         return Decision(Action.DENY, "takeover_not_authorized")
     if intent.kind is IntentKind.SILENCE_REQUEST:

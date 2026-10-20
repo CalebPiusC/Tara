@@ -27,3 +27,37 @@
 | Q-C2 | Is query rewriting worth its latency? | measure |
 | Q-C3 | Summarizer model and cost | measure |
 | Q-C4 | Topic-change detection quality | scripted meetings |
+
+## Unified runtime
+| ID | Question | Resolve by |
+|---|---|---|
+| Q-U1 | Does the mlx tokenizer pass `enable_thinking`; does `make_sampler` exist with this signature? | load Qwen in Phase 2 |
+| Q-U2 | Is Qwen3-0.6B good enough for intent, routing, and short answers? How calibrated is its confidence? | labelled routing/intent eval set |
+| Q-U3 | Keep all three models loaded vs on-demand on 24 GB with real usage? | measure RSS and latency |
+| Q-U4 | Which routing keywords misroute on real questions? | collect questions from simulations |
+| Q-U5 | Gemini auth header and schema field casing | one live call with a key |
+| Q-U6 | Android footprint of this stack | out of scope until the laptop path is measured |
+
+## Gemini Live (2026-10-20)
+| ID | Question | Resolve by |
+|---|---|---|
+| Q-L1 | Does the chosen model id connect on the Developer API with our key? | `python -m tara.voice.smoke` |
+| Q-L2 | Order of input transcription vs first response audio; does transcription arrive early enough for the gate? | real session logs (event kinds only) |
+| Q-L3 | Real connect, first-audio and interrupt-to-silence latency | metrics from a real session |
+| Q-L4 | Is discarded (gated or interrupted) generation billed? Can it be cut early? | billing page, usage metadata |
+| Q-L5 | Tool behavior per model (blocking, NON_BLOCKING, cancellation message) | opt-in tool test |
+| Q-L6 | Does resumption actually preserve context across reconnect; GoAway lead time | long session test |
+| Q-L7 | Does `hybrid_end_of_speech` improve latency? Best `silence_duration_ms`? | A/B with real audio |
+| Q-L8 | Is local energy VAD good enough for barge-in, or do we need a better VAD? | noisy-room test (VAD choice is a code dependency, not a model download we plan) |
+| Q-L9 | Can we gate earlier (manual activity signals) to avoid generating unaddressed replies? | prototype |
+
+## Conversational behaviour (2026-10-21)
+| ID | Question | Resolve by |
+|---|---|---|
+| Q-B1 | Does `gemini-3.8-live` produce audible laughter or other non-verbal sounds at all, and can instructions steer it? | listening test with a real key (not automatable) |
+| Q-B2 | Does the persona instruction measurably reduce stock openers, lists and over-length replies? | `tests/live/test_behaviour_live.py` over many runs |
+| Q-B3 | Does a mid-session style note change later replies, and does it ever trigger a spoken reply? | live note test plus A/B with guidance on and off |
+| Q-B4 | Is the 2.5 s floor wait and 1.5 s hold acceptable in real meetings, or too slow or too eager? | real-meeting timing data |
+| Q-B5 | How often do the English lexical signals misfire (urgency in casual speech, missed jokes)? | labelled transcript set; consider a cheap classifier |
+| Q-B6 | Does proactive audio (always on) reduce responses to background noise enough to matter? | noisy-room session metrics |
+| Q-B7 | Does the model honour "no human experience claims" and admit uncertainty reliably? | rubric flags over adversarial prompts |

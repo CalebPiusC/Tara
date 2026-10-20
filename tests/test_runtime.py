@@ -1,6 +1,7 @@
 import pytest
 from helpers import ready_rt
-from tara.runtime import IllegalTransition, MeetingRuntime, Proposal, State, TRANSITIONS
+
+from tara.runtime import TRANSITIONS, IllegalTransition, MeetingRuntime, Proposal, State
 
 
 def prop(rt, now=1000, eid="t1", epoch=None):

@@ -1,23 +1,34 @@
 import asyncio
 import json
+
 import pytest
+from helpers import cfg
+
 from tara.classify import LlmIntentClassifier, RuleIntentClassifier, name_hint, parse_intent
-from tara.config import AppPolicy, Mode
-from tara.contracts import HintKind, Passage, SpeakerHint, ToolCall
+from tara.config import AppPolicy, Mode, ToolSpec
 from tara.context import ContextEngine, parse_draft
-from tara.conversation import (COMMIT_LINE, UNKNOWN_LINE, ConversationEngine, ResponseDraft, RuntimeView,
-                               TranscriptLine, parse_response, render_transcript, validate_response)
+from tara.contracts import HintKind, Passage, SpeakerHint, ToolCall
+from tara.conversation import (
+    COMMIT_LINE,
+    UNKNOWN_LINE,
+    ConversationEngine,
+    ResponseDraft,
+    RuntimeView,
+    TranscriptLine,
+    parse_response,
+    render_transcript,
+    validate_response,
+)
 from tara.errors import MalformedOutput, ProviderTimeout
+from tara.evidence import EvidenceStore
 from tara.fakes import FailingLLM, FakeLLMProvider
 from tara.identity import AttributorParams, LabelMap, ParticipantRegistry, SpeakerAttributor
 from tara.interview import Assessment, InterviewEngine, Question, parse_quality
-from tara.evidence import EvidenceStore
 from tara.knowledge import InMemoryKnowledge
-from tara.participation import Attribution, IntentKind as K, Utterance
+from tara.participation import Attribution, Utterance
+from tara.participation import IntentKind as K
 from tara.reports import MeetingLog, interview_report, pitch_report
 from tara.tools import ToolDef, ToolExecutor
-from tara.config import ToolSpec
-from helpers import cfg, group_cfg
 
 run = asyncio.run
 
@@ -226,7 +237,7 @@ def test_pitch_without_knowledge_never_calls_llm():
 def test_pitch_grounded_answer_and_prompt_contains_passage():
     conv, llm = make_conv({"say": "It runs tests in parallel on each pull request.", "cites": ["kb1"]})
     v = run(conv.propose("how does testflow run tests in parallel", RuntimeView([TranscriptLine("Cy", 0.9, "hi")])))
-    assert v.text.startswith("It runs") and "[kb1]" in llm.calls[0].user and "untrusted" in llm.calls[0].system
+    assert v.text.startswith("It runs") and '<doc id="kb1">' in llm.calls[0].user and "untrusted" in llm.calls[0].system
 
 
 def test_conversation_propagates_provider_failure():

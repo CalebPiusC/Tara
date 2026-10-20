@@ -24,3 +24,33 @@ whisper.cpp / Core ML performance on M4 Pro; pyannote on MPS; Kokoro latency on 
 
 ## Memory and RAG sources (accessed 2026-10-19)
 R1-R7 are listed with what each established in [RAG_TECHNOLOGY_EVALUATION.md](RAG_TECHNOLOGY_EVALUATION.md): pgvector README, PostgreSQL full-text ranking docs, Gemini embeddings docs, bge-small-en-v1.5 and bge-reranker-base model cards, OWASP LLM01, Ragas metrics list. Not fetched: Postgres Row-Level Security docs, RRF paper, any benchmark.
+
+## Unified runtime sources (accessed 2026-10-20)
+| # | Source | Established |
+|---|---|---|
+| U1 | https://huggingface.co/Qwen/Qwen3-0.6B | Apache-2.0; 0.6B params (0.44B non-embedding); 32,768 context; `enable_thinking` default true, False disables; MLX-LM and llama.cpp listed; recommended sampling: non-thinking temp 0.7, top_p 0.8, top_k 20 |
+| U2 | https://github.com/ml-explore/mlx-lm | MIT; `pip install mlx-lm`; `load`, `generate`, `stream_generate`; Apple silicon; Qwen3 not named in the README |
+| U3 | https://huggingface.co/mlx-community/Qwen3-0.6B-4bit/tree/main | 11 files, 351 MB total, `model.safetensors` 335 MB |
+| U4 | https://ai.google.dev/api/generate-content | `POST .../v1beta/models/{model}:generateContent`; examples pass the key as a `key` query parameter (header name not stated on the fetched text; we use `x-goog-api-key`, unverified); snake_case generation config in examples |
+| U5 | https://huggingface.co/mlx-community/whisper-small-mlx/tree/main, https://huggingface.co/hexgrad/Kokoro-82M/tree/main, https://pypi.org/project/silero-vad/ | sizes 481 MB, 363 MB (Kokoro weights are a pickle `.pth`), silero-vad 6.2.3 needs torch |
+
+## Gemini Live sources (accessed 2026-10-20; summaries by a fetch tool)
+| # | Source | Established |
+|---|---|---|
+| L1 | https://ai.google.dev/gemini-api/docs/live | Stateful WSS; server-to-server vs client-to-server; PCM16 16 kHz in, 24 kHz out; barge-in, tools, transcription, proactive audio listed; partner integrations (LiveKit, Pipecat, Agora...) |
+| L2 | https://ai.google.dev/gemini-api/docs/live-guide | Python calls (`send_realtime_input`, `audio_stream_end`, `activity_start/end`), mime `audio/pcm;rate=16000`, transcription config, VAD config fields, `interrupted`, response modalities, voice config, proactive audio (v1beta) |
+| L3 | https://ai.google.dev/gemini-api/docs/live-session | 15 min audio-only without compression, 2 min with video; connection about 10 min; GoAway `time_left`; session resumption handles valid 2 h; context window compression |
+| L4 | https://ai.google.dev/gemini-api/docs/live-tools | function declarations, `send_tool_response`, manual handling, NON_BLOCKING + scheduling, not on 3.1 Flash Live; table/sample model-name mismatch |
+| L5 | https://ai.google.dev/gemini-api/docs/ephemeral-tokens | Live-only, `v1beta`, `uses`, `expire_time`, `live_connect_constraints`, not for backend connections |
+| L6 | https://ai.google.dev/api/live | message types, ServerContent fields, ActivityHandling semantics, TurnCoverage values |
+| L7 | https://ai.google.dev/gemini-api/docs/models | Live model ids and status (see GEMINI_LIVE.md) |
+| L8 | https://ai.google.dev/gemini-api/docs/pricing | Live pricing (paid) and free tier; free-tier data may improve Google products |
+| SDK | google-genai 2.31.0 (Apache-2.0), installed in `.venv` and inspected offline: `live.AsyncSession` methods, `types.LiveConnectConfig` fields, message types, `receive()` source | no network, no key used |
+
+## Conversational behaviour sources (accessed 2026-10-21; summaries by a fetch tool)
+| # | Source | Established |
+|---|---|---|
+| L9 | https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live | 3.8 Live: limits, interleaved reasoning, async function calling default, client content all session, proactive audio always on (false errors), affective dialogue removed, structured output unsupported |
+| L10 | https://ai.google.dev/gemini-api/docs/speech-generation | TTS style field, `<laugh>`/`<sigh>`/pause tags, 30 prebuilt voices; states TTS is distinct from the Live API and does not say these controls apply to Live |
+| L2 (re-read) | https://ai.google.dev/gemini-api/docs/live-guide | affective dialog and proactive audio sections; no coverage of tone, accent or non-verbal control for Live; `send_client_content` supported through the session |
+| SDK | google-genai 2.31.0 `LiveConnectConfig` field help: `enable_affective_dialog` "detect emotions and adapt" (not valid on 3.8 Live per L9), `proactivity`, `thinking_config` | local introspection |

@@ -1,12 +1,15 @@
 """Failure-injection tests for MeetingEngine (fakes only)."""
 import asyncio
-from test_engine import U, build, run, settle
+
 from helpers import cfg, group_cfg
+from test_engine import U, build, run, settle
+
 from tara import events as E
 from tara.adapters.local import LocalMeetingAdapter
 from tara.audio import silence, tone
 from tara.config import ToolSpec
-from tara.contracts import MeetingEvent, MeetingEventKind as MK, PCMChunk, Transcript
+from tara.contracts import MeetingEvent, PCMChunk, Transcript
+from tara.contracts import MeetingEventKind as MK
 from tara.engine import EngineParams
 from tara.fakes import FakeLLMProvider, FakeStt
 from tara.runtime import State
