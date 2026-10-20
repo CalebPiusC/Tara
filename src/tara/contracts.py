@@ -156,6 +156,8 @@ class ToolResult:
     error: str | None = None
     pending_approval: bool = False
     untrusted: bool = True   # tool output is data, never instructions
+    retryable: bool = False
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 # ---- protocols -------------------------------------------------------------

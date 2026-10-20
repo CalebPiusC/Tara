@@ -4,7 +4,7 @@
 
 Tara joins your meeting, works out why it exists, tracks who is speaking, and takes part only as far as the organizer's rules and the live state of the conversation allow. It can run an interview, sit in on an engineering meeting, pitch a product from approved docs, or just listen and write the notes.
 
-> **Honest status:** Tara's voice engine is **Gemini Live**, integrated behind our own interfaces and tested with scripted fakes and the real SDK's types (**389 offline tests passing, 6 skipped**). One real one-turn smoke test now passes against the hosted service: **1.77 s connect, 1.04 s to first audio, 24 kHz output**. The owner has run a real microphone/headphone conversation; persistent memory v1 is implemented and tested against real PostgreSQL; the full live behaviour suite, real Gemini memory-tool calls, real interruption/reconnect, and Google Meet are **not** tested. **No local model is downloaded or used.** See [what works today](#-what-works-today) and [GEMINI_LIVE](docs/GEMINI_LIVE.md).
+> **Honest status:** Tara's voice engine is **Gemini Live**, integrated behind our own interfaces and tested with scripted fakes and the real SDK's types (**see the newest changelog entry for the current offline count**). One real one-turn smoke test now passes against the hosted service: **1.77 s connect, 1.04 s to first audio, 24 kHz output**. The owner has run a real microphone/headphone conversation; persistent memory v1 is implemented and tested against real PostgreSQL; read-only orchestration tools (time, location, weather, public pages, bounded research) are implemented, with Open-Meteo and countries.dev checked live and Brave search untested (no key). The full live behaviour suite, real Gemini tool calls, real interruption/reconnect, and Google Meet are **not** tested. **No local model is downloaded or used.** See [what works today](#-what-works-today), [GEMINI_LIVE](docs/GEMINI_LIVE.md) and [ORCHESTRATION](docs/ORCHESTRATION.md).
 
 ---
 
@@ -91,7 +91,7 @@ sequenceDiagram
 Live conversation state stays in process and is never replaced by search. v1 adds durable long-term memory in PostgreSQL: explicit `remember_memory`, `recall_memory` and `forget_memory` tools, a bounded startup memory block, full-text retrieval, required provenance and tenant/user isolation. It does **not** include embeddings/pgvector, document ingestion, automatic consolidation, Redis or persisted meeting notes; real Gemini tool calling is still unverified. Design: [MEMORY_AND_RAG](docs/MEMORY_AND_RAG.md), [operations](docs/MEMORY_OPERATIONS.md), [context assembly](docs/CONTEXT_ASSEMBLY.md), [security](docs/MEMORY_AND_RETRIEVAL_SECURITY.md). The older keyword-overlap stand-in in [knowledge.py](src/tara/knowledge.py) is still separate.
 
 ## ✅ What works today
-Most of this is verified offline against fakes and the SDK's real data types. **One real one-turn Gemini Live smoke test has run; nothing has used a real microphone or a real meeting, and live behaviour, interruption and reconnect remain unverified.**
+Most of this is verified offline against fakes and the SDK's real data types. **One real one-turn Gemini Live smoke test has run; the owner has also run a headphone conversation with the local demo, but nothing has used Google Meet, and live behaviour, interruption and reconnect remain unverified.**
 
 | Area | Where | What it does |
 |---|---|---|
@@ -104,13 +104,14 @@ Most of this is verified offline against fakes and the SDK's real data types. **
 | Conversational behaviour | [behaviour/](src/tara/behaviour/) | Profiles, room-reading signals, humour and verbosity rules, style notes, output quality checks, avatar-ready expression events, floor etiquette (waits while someone is mid-sentence) |
 | Memory interfaces | [voice/memory.py](src/tara/voice/memory.py), [memory/](src/tara/memory/) | Working memory, scoped meeting memory with provenance, persistent explicit long-term memory in PostgreSQL, bounded retrieval |
 | Tools | [tools.py](src/tara/tools.py) | Granted, typed, time-limited, audited; side effects need approval |
+| Orchestration tools | [orchestration/](src/tara/orchestration/) | Read-only time/calculator, Open-Meteo location/weather, public-page fetch, opt-in Brave search, bounded research and in-process tasks; no side effects ([ORCHESTRATION](docs/ORCHESTRATION.md)) |
 | Settings and metrics | [settings.py](src/tara/settings.py), [metrics.py](src/tara/metrics.py) | Validated environment config; latency and failure counters |
 | Deterministic core | [config.py](src/tara/config.py), [runtime.py](src/tara/runtime.py), [participation.py](src/tara/participation.py), others | Meeting config validation, floor state machine, identity, evidence, reports |
 | Optional local path (dormant) | [engine.py](src/tara/engine.py), [providers/](src/tara/providers/) | The earlier cascaded STT, router, LLM, TTS runtime; kept and tested with fakes, not started, **no models downloaded** |
 
 ## 🚧 What does not work yet
 - Only one real text-in/audio-out Gemini Live smoke turn has run: audio input, playback audibility, event ordering under interruption, tool behavior and speech-to-speech latency are unverified ([smoke test](#-run-it)).
-- The local audio-device demo has not been run on real hardware yet, and there is **no Google Meet connection**. The official Meet Media API is Developer Preview and closed to new signups; the plan is a browser participant or a third-party bot API ([GOOGLE_MEET_RESEARCH](docs/GOOGLE_MEET_RESEARCH.md)).
+- The local audio-device demo has run on headphones; speaker mode is half-duplex because there is no echo cancellation, and there is **no Google Meet connection**. The official Meet Media API is Developer Preview and closed to new signups; the plan is a browser participant or a third-party bot API ([GOOGLE_MEET_RESEARCH](docs/GOOGLE_MEET_RESEARCH.md)).
 - Speaker identity is unknown on mixed audio.
 - Memory v1 stores explicit long-term memories in PostgreSQL, but there is **no document RAG, vector search, automatic extraction or Redis**, and meeting notes are still in-memory. Real Gemini tool calling for save/recall/forget is unverified.
 - No vocal expression is verified (laughter, tone, pacing): the smoke call produced audio but nobody evaluated it, and no behaviour scenario has been run. The Live docs do not document controls for them.
@@ -124,7 +125,7 @@ Python 3.13 (3.11+ required) · `google-genai` SDK for Gemini Live (optional ext
 ```bash
 python3.13 -m venv .venv
 .venv/bin/pip install -e ".[dev,live,audio,memory]"
-.venv/bin/python -m pytest -q            # 389 offline tests, 6 skipped (opt-in DB/live); no network or key
+.venv/bin/python -m pytest -q            # offline suite: no network or key; see CHANGELOG.md for the current count
 .venv/bin/ruff check src tests && .venv/bin/mypy src
 ```
 Real-service smoke test (opt-in; makes one real API call; prints measurements only, never the key or transcripts):

@@ -1,6 +1,6 @@
 # Tara Documentation
 
-Source of truth for product intent: [`../initial.md`](../initial.md). Most of the backend is implemented and tested offline; every doc says its own status. One real one-turn Gemini Live smoke test has run (text in, audio out); a local mic/speaker demo adapter exists but has not run on real hardware, nothing has run with Google Meet, and live behaviour, interruption and reconnect remain unverified. Research date: 2026-10-19.
+Source of truth for product intent: [`../initial.md`](../initial.md). Most of the backend is implemented and tested offline; every doc says its own status. One real one-turn Gemini Live smoke test has run (text in, audio out); a local mic/speaker demo adapter exists and the owner has run a headphone conversation, nothing has run with Google Meet, and live behaviour, interruption and reconnect remain unverified. Read-only orchestration tools (time, location, weather, public pages, bounded research) are implemented; Open-Meteo and countries.dev were checked live, Brave search was not (no key). Research date: 2026-10-19; orchestration added 2026-10-20.
 
 ## Product
 [PRODUCT_VISION](PRODUCT_VISION.md) · [PRODUCT_REQUIREMENTS](PRODUCT_REQUIREMENTS.md) · [GLOSSARY](GLOSSARY.md)
@@ -9,7 +9,7 @@ Source of truth for product intent: [`../initial.md`](../initial.md). Most of th
 ## Research
 [GOOGLE_MEET_RESEARCH](GOOGLE_MEET_RESEARCH.md) · [SPEECH_RECOGNITION_RESEARCH](SPEECH_RECOGNITION_RESEARCH.md) · [SPEAKER_IDENTIFICATION_RESEARCH](SPEAKER_IDENTIFICATION_RESEARCH.md) · [VAD_AND_TURN_DETECTION_RESEARCH](VAD_AND_TURN_DETECTION_RESEARCH.md) · [GEMINI_RESEARCH](GEMINI_RESEARCH.md) · [KOKORO_RESEARCH](KOKORO_RESEARCH.md) · [REAL_TIME_ARCHITECTURE_RESEARCH](REAL_TIME_ARCHITECTURE_RESEARCH.md) · [AVATAR_RESEARCH](AVATAR_RESEARCH.md) · [research/](research/README.md) (sources, comparisons, live-voice reference, open questions)
 ## Voice engine (primary)
-[GEMINI_LIVE](GEMINI_LIVE.md): Gemini Live architecture, verified facts, interruption, run steps, status · [CONVERSATIONAL_BEHAVIOUR](CONVERSATIONAL_BEHAVIOUR.md): personality, profiles, meeting kinds, humour, expression events, floor etiquette · [MEETING_CONTROLS](MEETING_CONTROLS.md): spoken commands, permissions, platform limits, notes
+[GEMINI_LIVE](GEMINI_LIVE.md): Gemini Live architecture, verified facts, interruption, run steps, status · [ORCHESTRATION](ORCHESTRATION.md): time zones, location, weather, search, pages, bounded research, background tasks · [CONVERSATIONAL_BEHAVIOUR](CONVERSATIONAL_BEHAVIOUR.md): personality, profiles, meeting kinds, humour, expression events, floor etiquette · [MEETING_CONTROLS](MEETING_CONTROLS.md): spoken commands, permissions, platform limits, notes
 ## Runtime foundation (optional local path)
 [RUNTIME_FOUNDATION](RUNTIME_FOUNDATION.md) (implemented against fakes: routing, state, lifecycle, tools, context assembly, metrics)
 ## Memory and RAG

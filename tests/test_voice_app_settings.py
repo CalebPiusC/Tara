@@ -58,7 +58,10 @@ def test_app_runs_a_scripted_turn_end_to_end_with_no_local_models():
             assert h["status"] == "active" and h["key"] == "set" and "SECRET-123" not in json.dumps(h)
             cfg_sent = app.provider.opened[0][0]
             assert "Tara" in cfg_sent.system_instruction and cfg_sent.context_compression
-            assert [t.name for t in cfg_sent.tools] == ["record_note"]     # notes mode is on by default
+            names = [t.name for t in cfg_sent.tools]
+            assert "record_note" in names and "get_time" in names
+            assert "web_search" not in names and "start_research" not in names   # search needs a key
+            assert "Use the provided tools" in cfg_sent.system_instruction
             sess.push(InputTranscript("Tara, hello there", True), ResponseAudio(1, b"\x00\x00" * 2400), TurnComplete(1))
             end = asyncio.get_event_loop().time() + 3
             while not app.playback.results and asyncio.get_event_loop().time() < end:
@@ -92,7 +95,7 @@ def test_app_wires_memory_tools_and_injects_stored_context_at_session_start():
         try:
             cfg_sent = app.provider.opened[0][0]
             names = [t.name for t in cfg_sent.tools]
-            assert names == ["record_note", "remember_memory", "recall_memory", "forget_memory"]
+            assert {"record_note", "remember_memory", "recall_memory", "forget_memory"} <= set(names)
             assert "recall_memory" in cfg_sent.system_instruction
             assert "Testflow is a computer-based testing platform" in cfg_sent.system_instruction
             assert app.health()["memory"] == "enabled"
@@ -107,7 +110,9 @@ def test_memory_is_off_by_default_and_adds_no_tools():
         await app.start()
         try:
             assert app.health()["memory"] == "disabled"
-            assert [t.name for t in app.provider.opened[0][0].tools] == ["record_note"]
+            names = [t.name for t in app.provider.opened[0][0].tools]
+            assert "record_note" in names
+            assert not {"remember_memory", "recall_memory", "forget_memory"} & set(names)
         finally:
             await app.close()
     run(go())

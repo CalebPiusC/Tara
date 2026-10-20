@@ -14,3 +14,4 @@
 | [0011](0011-memory-trust-and-promotion.md) | Memory trust and promotion | Proposed |
 | [0012](0012-unified-runtime-routing.md) | Unified runtime, rule-bounded routing | Proposed |
 | [0013](0013-gemini-live-primary.md) | Gemini Live primary, local models dormant | Accepted (unverified live) |
+| [0014](0014-orchestration-tools.md) | Orchestration as read-only tools in the Live path | Accepted (implemented offline; Brave live unverified) |

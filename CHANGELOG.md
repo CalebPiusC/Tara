@@ -6,13 +6,19 @@ Read this first if you are joining mid-stream. It says **where the project start
 
 ## How to pick up from here
 1. Read [initial.md](initial.md) (product source of truth), then [docs/README.md](docs/README.md).
-2. Run `python3.13 -m venv .venv && .venv/bin/pip install -e ".[dev,live,audio,memory]" && .venv/bin/python -m pytest -q`. Expect all green (389 passed, 6 skipped at the latest entry).
+2. Run `python3.13 -m venv .venv && .venv/bin/pip install -e ".[dev,live,audio,memory]" && .venv/bin/python -m pytest -q`. Expect all green (see the newest entry for the exact count; external/live tiers are opt-in).
 3. Open questions: [docs/research/OPEN_QUESTIONS.md](docs/research/OPEN_QUESTIONS.md). Roadmap: [docs/IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md).
 4. Rules for contributors and agents: [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md).
 
 ---
 
 ## [Unreleased]
+
+### 2026-10-20: orchestration workstream merged into main
+**Implemented and tested offline: `450 passed, 6 skipped, 7 deselected`; `ruff check src tests` and `mypy src` clean.**
+- Merged `feature/orchestrator` (read-only time, location, weather, search, public-page fetch and bounded research tools plus background tasks) into `main` alongside persistent memory v1. Merge conflicts were resolved in `settings.py`, `tools.py`, `voice/app.py`, `pyproject.toml`, `.env.example`, `README.md` and the Live/behaviour/roadmap docs; both feature sets are active in one composition root.
+- `tests/test_voice_app_settings.py`: memory-tool assertions no longer pin the full tool list, because orchestration tools are registered in the same executor; they now check the memory tools are present when memory is on and absent when it is off.
+- **Not verified:** every unverified item named in the two entries below still stands (real Live-model tool selection, Brave search without a key, orchestration latency, real meeting behaviour).
 
 ### 2026-10-20: persistent memory v1 (PostgreSQL, explicit save/recall/forget)
 **Implemented and tested. Offline suite: 389 passed, 6 skipped, 4 deselected; real PostgreSQL suite: 6 passed in a throwaway schema; `ruff check src tests` and `mypy src` clean. No real Gemini tool call has run yet, so how the live model uses the tools is unverified.**
@@ -27,6 +33,26 @@ Read this first if you are joining mid-stream. It says **where the project start
 - Docs: rewritten [MEMORY_AND_RAG](docs/MEMORY_AND_RAG.md) status and v1 flow, new [MEMORY_OPERATIONS](docs/MEMORY_OPERATIONS.md), ADR-0012, and status updates to the data model, security, context-assembly, README, local-development and `.env.example` files.
 - **Not done:** real Gemini tool calling, automatic memory extraction/consolidation, document ingestion/chunking, embeddings/pgvector, hybrid retrieval, Redis, persisted meeting notes, per-turn Live context assembly, ACL tables/RLS, audit log, encryption, measured voice latency with memory on. The model must choose to call the tools; there is no deterministic save fallback.
 - **Durability evidence:** beyond the tests, a two-process check saved a memory in one Python process and recalled the same id in a second process against a throwaway PostgreSQL schema (1 hit).
+### 2026-10-20: orchestration tools: time, location, weather, search and bounded research
+**Implemented offline (428 tests: `428 passed, 7 deselected`; ruff and mypy clean). Open-Meteo geocoding/weather, countries.dev and a public `example.com` fetch passed against the real services; Brave search is implemented but was not called live because no API key was available. No orchestration latency number is claimed. Nothing touches Google Meet, sends messages, spends money or changes account settings.**
+- `src/tara/orchestration/`: new read-only tools wired into the existing `ToolDef`/`ToolExecutor` Live function-calling path, not a second agent.
+  - `contracts.py`: HTTP/search/place/country/weather/research/task data contracts and protocols; recursive JSON-safe `as_dict`.
+  - `http.py`: bounded async `urllib` client running in a worker thread, JSON parsing, short-text cleaning, bounded TTL cache with per-provider expiry.
+  - `time.py`: `get_time`, `convert_time`, `time_until`; IANA zones via `zoneinfo`, DST-aware, rejects nonexistent local times, flags ambiguous fall-back times and uses fold 0.
+  - `calculator.py`: AST-only arithmetic and unit conversion; no `eval`; rejects names, attributes, comprehensions and oversized exponents.
+  - `places.py`: Open-Meteo geocoding with alternatives/`ambiguous`/`assumed`, countries.dev facts with custom User-Agent, and `get_time_at_place`.
+  - `weather.py`: Open-Meteo current conditions plus up to 7 forecast days, observation time and CC BY 4.0 attribution; no alerts are invented (`alerts_supported=false`).
+  - `search.py`: Brave `SearchProvider`, structured hits, public-URL filtering, duplicate removal, explicit auth/rate-limit/server failures. Search is off by default and needs `TARA_SEARCH_API_KEY`.
+  - `fetch.py`: SSRF-resistant public HTTP(S) retrieval (private/loopback/link-local/reserved addresses, URL credentials, non-80/443 ports, redirect revalidation), byte and character bounds, readable-text extraction that drops scripts/styles.
+  - `research.py`: one search plus bounded pages with source ids/URLs/dates, partial-failure warnings, session budget, and in-process background tasks with ids, ownership, timestamps, progress, timeout, cancellation, result/error and TTL. Completion is pull-based; there is no auto-speak and no durable queue.
+  - `service.py`: `Orchestration` composition root; provider wiring from `ToolSettings`, health and close.
+- `tools.py`: `ToolDef` gains `category`, `cost`, `latency`, `parameters_schema`; `ToolExecutor.catalog()` exposes schema/async/side-effect/timeout metadata while `describe()` keeps its stable minimal shape; `ToolError` becomes a structured `ToolResult` (stable code, retryable, safe details). Argument checks accept ints for float parameters.
+- `errors.py`: typed `ToolError` with `code`, `retryable` and content-free `details`.
+- `settings.py`: `ToolSettings`, environment parsing, URL/timeout/budget validation, search-key requirement, and redacted output.
+- `voice/app.py`: builds `Orchestration` at composition when enabled, registers its tools with the notes tool, appends bounded orchestration instructions, passes the per-turn budget, closes tasks, and reports orchestration health. `voice/engine.py`: per-turn tool budget with reset at turn completion and interruption, queue latency metric, and structured error payloads; tool result size raised to 12,000 chars.
+- Tests: `tests/test_orchestration_{time,calculator,weather,search,fetch,research,service}.py`, `tests/test_voice_orchestration.py`, shared fakes, and updates to `tests/test_voice_app_settings.py` for the new declarations. Opt-in real-provider tier: `tests/external/test_providers.py` (`TARA_EXTERNAL_TESTS=1`, marker `external`, excluded by default). On 2026-10-20: `2 passed, 1 skipped` (Brave skipped).
+- Docs: [ORCHESTRATION](docs/ORCHESTRATION.md), [CONFIGURATION](docs/CONFIGURATION.md), [ADR-0014](docs/adr/0014-orchestration-tools.md), docs index, `.env.example`, README test count.
+- **Not done / unverified:** live Brave request (no key), real Live-model tool selection and orchestration latency, direct-answer search grounding, durable background tasks, automatic task notifications, user-location service, consequential-action confirmation flow, Google Meet, browser automation.
 
 ### 2026-10-21: local microphone/speaker demo
 **Implemented offline (367 tests, ruff and mypy clean). The adapter and CLI are fake-backend tested; the owner ran the headphone conversation on real hardware, and speaker output needs half-duplex `--speaker` because there is no echo cancellation. No Google Meet connection.**

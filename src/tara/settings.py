@@ -121,6 +121,43 @@ class MemorySettings:
 
 
 @dataclass(frozen=True)
+class ToolSettings:
+    """Read-only information and research tools (docs/ORCHESTRATION.md).
+
+    These are application-level grants, not meeting-config grants.  Side-effecting
+    tools still need their own policy; nothing here can speak or widen participation.
+    """
+
+    enabled: bool = True
+    time: bool = True
+    calculator: bool = True
+    location: bool = True
+    weather: bool = True
+    search: bool = False               # requires a subscription token
+    fetch: bool = True                 # public URL reading; SSRF checks always apply
+    research: bool = True              # only registered when search + fetch are available
+    background: bool = True
+    search_provider: str = "brave"
+    search_api_key: str = field(default="", repr=False)
+    weather_base_url: str = "https://api.open-meteo.com/v1/forecast"
+    geocoding_base_url: str = "https://geocoding-api.open-meteo.com/v1"
+    country_base_url: str = "https://countries.dev"
+    http_timeout_s: float = 8.0
+    research_timeout_s: float = 25.0
+    research_sources: int = 3
+    research_chars: int = 8000
+    background_tasks: int = 2
+    task_ttl_s: float = 1800.0
+    max_calls_per_turn: int = 8
+    search_calls_per_session: int = 8
+    weather_cache_s: float = 300.0
+    geocode_cache_s: float = 86400.0
+    country_cache_s: float = 604800.0
+    search_cache_s: float = 60.0
+    user_agent: str = "Tara/0.0 (local voice assistant)"
+
+
+@dataclass(frozen=True)
 class PersonaSettings:
     """Conversational behaviour (docs/CONVERSATIONAL_BEHAVIOUR.md). Style only: no permissions live here."""
 
@@ -149,6 +186,7 @@ class RuntimeSettings:
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
     live: LiveSettings = field(default_factory=LiveSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    tools: ToolSettings = field(default_factory=ToolSettings)
     persona: PersonaSettings = field(default_factory=PersonaSettings)
     behavior: BehaviorSettings = field(default_factory=BehaviorSettings)
 
@@ -211,6 +249,35 @@ class RuntimeSettings:
                 write_timeout_s=_num(e, "TARA_MEMORY_WRITE_TIMEOUT_S", MemorySettings.write_timeout_s),
                 recall_timeout_s=_num(e, "TARA_MEMORY_RECALL_TIMEOUT_S", MemorySettings.recall_timeout_s),
                 schema=e.get("TARA_MEMORY_SCHEMA", "")),
+            tools=ToolSettings(
+                enabled=_bool(e.get("TARA_TOOLS_ENABLED"), True),
+                time=_bool(e.get("TARA_TOOLS_TIME"), True),
+                calculator=_bool(e.get("TARA_TOOLS_CALCULATOR"), True),
+                location=_bool(e.get("TARA_TOOLS_LOCATION"), True),
+                weather=_bool(e.get("TARA_TOOLS_WEATHER"), True),
+                search=_bool(e.get("TARA_TOOLS_SEARCH"), False),
+                fetch=_bool(e.get("TARA_TOOLS_FETCH"), True),
+                research=_bool(e.get("TARA_TOOLS_RESEARCH"), True),
+                background=_bool(e.get("TARA_TOOLS_BACKGROUND"), True),
+                search_provider=e.get("TARA_SEARCH_PROVIDER", "brave").strip().lower(),
+                search_api_key=e.get("TARA_SEARCH_API_KEY", ""),
+                weather_base_url=e.get("TARA_TOOLS_WEATHER_URL", "https://api.open-meteo.com/v1/forecast"),
+                geocoding_base_url=e.get("TARA_TOOLS_GEOCODING_URL", "https://geocoding-api.open-meteo.com/v1"),
+                country_base_url=e.get("TARA_TOOLS_COUNTRY_URL", "https://countries.dev"),
+                http_timeout_s=_num(e, "TARA_TOOLS_HTTP_TIMEOUT_S", ToolSettings.http_timeout_s),
+                research_timeout_s=_num(e, "TARA_TOOLS_RESEARCH_TIMEOUT_S", ToolSettings.research_timeout_s),
+                research_sources=_num(e, "TARA_TOOLS_RESEARCH_SOURCES", ToolSettings.research_sources, int),
+                research_chars=_num(e, "TARA_TOOLS_RESEARCH_CHARS", ToolSettings.research_chars, int),
+                background_tasks=_num(e, "TARA_TOOLS_TASKS", ToolSettings.background_tasks, int),
+                task_ttl_s=_num(e, "TARA_TOOLS_TASK_TTL_S", ToolSettings.task_ttl_s),
+                max_calls_per_turn=_num(e, "TARA_TOOLS_MAX_CALLS_PER_TURN", ToolSettings.max_calls_per_turn, int),
+                search_calls_per_session=_num(e, "TARA_TOOLS_SEARCH_SESSION_LIMIT",
+                                              ToolSettings.search_calls_per_session, int),
+                weather_cache_s=_num(e, "TARA_TOOLS_WEATHER_CACHE_S", ToolSettings.weather_cache_s),
+                geocode_cache_s=_num(e, "TARA_TOOLS_GEOCODE_CACHE_S", ToolSettings.geocode_cache_s),
+                country_cache_s=_num(e, "TARA_TOOLS_COUNTRY_CACHE_S", ToolSettings.country_cache_s),
+                search_cache_s=_num(e, "TARA_TOOLS_SEARCH_CACHE_S", ToolSettings.search_cache_s),
+                user_agent=e.get("TARA_TOOLS_USER_AGENT", ToolSettings.user_agent)),
             persona=PersonaSettings(
                 profile=e.get("TARA_PERSONA_PROFILE", "professional").strip().lower(),
                 guidance_injection=_bool(e.get("TARA_PERSONA_GUIDANCE"), True),
@@ -228,9 +295,12 @@ class RuntimeSettings:
 
     def redacted(self) -> dict:
         """Safe to log: no secrets."""
-        g = self.gemini
+        g, t = self.gemini, self.tools
         mem = self.memory
-        return {"persona": self.persona.__dict__, "live": self.live.__dict__, "models": self.models.__dict__, "inference": self.inference.__dict__, "limits": self.limits.__dict__,
+        tools = {k: v for k, v in t.__dict__.items() if k != "search_api_key"}
+        tools["search_api_key"] = "set" if t.search_api_key else "missing"
+        return {"persona": self.persona.__dict__, "live": self.live.__dict__, "models": self.models.__dict__,
+                "inference": self.inference.__dict__, "limits": self.limits.__dict__, "tools": tools,
                 "gemini": {"enabled": g.enabled, "model": g.model, "api_key": "set" if g.api_key else "missing"},
                 "memory": {"enabled": mem.enabled, "database_url": "set" if mem.database_url else "missing",
                            "search_limit": mem.search_limit, "context_max_chars": mem.context_max_chars,
@@ -248,7 +318,7 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
     def warn(f: str, m: str) -> None:
         out.append(Issue("warning", f, m))
 
-    m, i, lim, g, b = s.models, s.inference, s.limits, s.gemini, s.behavior
+    m, i, lim, g, b, ts = s.models, s.inference, s.limits, s.gemini, s.behavior, s.tools
     if m.stt_backend not in STT_BACKENDS: err("TARA_STT_BACKEND", f"unknown backend {m.stt_backend!r}")
     if m.llm_backend not in LLM_BACKENDS: err("TARA_LOCAL_LLM_BACKEND", f"unknown backend {m.llm_backend!r}")
     if m.tts_backend not in TTS_BACKENDS: err("TARA_TTS_BACKEND", f"unknown backend {m.tts_backend!r}")
@@ -277,6 +347,40 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
             err("TARA_LIVE_*", "hold_ms >= 0 and queue sizes >= 1")
         if not lv.context_compression and lv.session_resumption is False:
             warn("TARA_LIVE_COMPRESSION", "without compression audio-only sessions end after about 15 minutes (docs)")
+    if ts.enabled:
+        if ts.search_provider != "brave":
+            err("TARA_SEARCH_PROVIDER", "only 'brave' is implemented")
+        if ts.search and not ts.search_api_key:
+            err("TARA_SEARCH_API_KEY", "required when TARA_TOOLS_SEARCH is on")
+        if not ts.user_agent.strip():
+            err("TARA_TOOLS_USER_AGENT", "must not be empty")
+        if ts.research and not ts.fetch:
+            warn("TARA_TOOLS_RESEARCH", "research needs URL retrieval; it will not be registered while fetch is off")
+        for field_name, timeout_value in (
+                ("TARA_TOOLS_HTTP_TIMEOUT_S", ts.http_timeout_s),
+                ("TARA_TOOLS_RESEARCH_TIMEOUT_S", ts.research_timeout_s),
+                ("TARA_TOOLS_TASK_TTL_S", ts.task_ttl_s)):
+            if not 0 < timeout_value <= 86_400.0:
+                err(field_name, "must be a positive number of seconds")
+        for field_name, count_value, low, high in (
+                ("TARA_TOOLS_RESEARCH_SOURCES", ts.research_sources, 1, 5),
+                ("TARA_TOOLS_RESEARCH_CHARS", ts.research_chars, 1000, 20_000),
+                ("TARA_TOOLS_TASKS", ts.background_tasks, 1, 8),
+                ("TARA_TOOLS_MAX_CALLS_PER_TURN", ts.max_calls_per_turn, 1, 20),
+                ("TARA_TOOLS_SEARCH_SESSION_LIMIT", ts.search_calls_per_session, 1, 50)):
+            if not low <= count_value <= high:
+                err(field_name, f"must be between {low} and {high}")
+        for field_name, cache_value in (("TARA_TOOLS_WEATHER_CACHE_S", ts.weather_cache_s),
+                                        ("TARA_TOOLS_GEOCODE_CACHE_S", ts.geocode_cache_s),
+                                        ("TARA_TOOLS_COUNTRY_CACHE_S", ts.country_cache_s),
+                                        ("TARA_TOOLS_SEARCH_CACHE_S", ts.search_cache_s)):
+            if cache_value < 0:
+                err(field_name, "must be >= 0")
+        for field_name, url_value in (("TARA_TOOLS_WEATHER_URL", ts.weather_base_url),
+                                      ("TARA_TOOLS_GEOCODING_URL", ts.geocoding_base_url),
+                                      ("TARA_TOOLS_COUNTRY_URL", ts.country_base_url)):
+            if not url_value.startswith("https://"):
+                err(field_name, "must be an https URL")
     pr = s.persona
     if pr.profile not in ("professional", "conversational", "expressive"):
         err("TARA_PERSONA_PROFILE", "must be professional, conversational or expressive")

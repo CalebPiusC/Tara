@@ -29,6 +29,7 @@ from ..memory import (
     remember_memory_tool,
 )
 from ..metrics import Metrics
+from ..orchestration import Orchestration
 from ..participation import Thresholds
 from ..settings import RuntimeSettings, validate
 from ..tools import ToolDef, ToolExecutor
@@ -51,11 +52,24 @@ def tool_declarations(executor: ToolExecutor | None) -> tuple[ToolDecl, ...]:
     if executor is None:
         return ()
     out = []
-    for d in executor.describe():
-        props = {k: {"type": _TYPES.get({"str": str, "int": int, "float": float, "bool": bool}.get(t, str), "STRING")}
-                 for k, t in d["params"].items()}
-        out.append(ToolDecl(d["name"], d["description"], {"type": "OBJECT", "properties": props, "required": d["required"]}))
+    for d in executor.catalog():
+        out.append(ToolDecl(d["name"], d["description"], d.get("schema") or {"type": "OBJECT", "properties": {}}))
     return tuple(out)
+
+
+def _add_tool_defs(tools: ToolExecutor | None, definitions: tuple[ToolDef, ...]) -> ToolExecutor | None:
+    """Register code-owned orchestration tools; the model never supplies a grant."""
+    if not definitions:
+        return tools
+    tools = tools or ToolExecutor({}, ())
+    existing = {d["name"] for d in tools.describe()}
+    for definition in definitions:
+        if definition.name in existing:
+            raise ConfigError(f"tool {definition.name!r} is already registered")
+        tools.register_and_grant(definition, ToolSpec(definition.name, definition.permission or "orchestration",
+                                                      requires_human_approval=False))
+        existing.add(definition.name)
+    return tools
 
 
 def knowledge_tool(knowledge: KnowledgeProvider, scope: Scope, timeout_s: float = 5.0) -> ToolDef:
@@ -75,7 +89,7 @@ class LiveTaraApp:
                  registry: SessionRegistry | None = None, bus: EventBus | None = None,
                  meeting_memory: MeetingMemory | None = None, thresholds: Thresholds = DEFAULT_THRESHOLDS,
                  expression_sink: ExpressionSink | None = None, memory_service: MemoryService | None = None,
-                 user_id: str = "local-user"):
+                 user_id: str = "local-user", orchestration: Orchestration | None = None):
         errors = [f"{i.field}: {i.message}" for i in validate(settings) if i.severity == "error"]
         if not settings.live.enabled:
             errors.append("TARA_LIVE_ENABLED: Live voice is not enabled")
@@ -100,6 +114,15 @@ class LiveTaraApp:
             self._owns_memory = True
         self.memory_scope = MemoryScope(scope.tenant_id, user_id) if self.memory_service is not None else None
         self.memory_gate = MemoryWriteGate() if self.memory_service is not None else None
+        # Orchestration is a code-owned set of read-only tools. The model can choose
+        # among them, but cannot grant one, widen a scope, or speak through them.
+        self.orchestration = orchestration
+        if self.orchestration is None and settings.tools.enabled:
+            self.orchestration = Orchestration(
+                settings.tools, session_id=session_id, tenant_id=scope.tenant_id, meeting_id=scope.meeting_id,
+                metrics=self.metrics)
+        if self.orchestration is not None:
+            tools = _add_tool_defs(tools, self.orchestration.tool_defs)
         # Notes are a granted, code-owned tool. The spoken notes mode authorizes each write; the
         # handler re-checks it, and the model can never choose the memory scope.
         notes_enabled = CommandKind.NOTES_ON in (set(map(CommandKind, cfg.allowed_commands)) if cfg.allowed_commands
@@ -126,9 +149,12 @@ class LiveTaraApp:
                     tools.register_and_grant(definition, grant)
         self.provider: VoiceProvider = provider or GeminiLiveProvider(
             settings.gemini.api_key, lv.model, lv.connect_timeout_s, lv.api_version or None)
+        instruction = live_system_instruction(cfg, names, roles, self.profile, pr.vocal_reactions,
+                                              memory_enabled=self.memory_service is not None)
+        if self.orchestration is not None:
+            instruction = f"{instruction}\n{self.orchestration.instructions()}"
         session_cfg = VoiceSessionConfig(
-            system_instruction=live_system_instruction(cfg, names, roles, self.profile, pr.vocal_reactions,
-                                                       memory_enabled=self.memory_service is not None),
+            system_instruction=instruction,
             voice_name=lv.voice_name,
             tools=tool_declarations(tools), input_transcription=lv.input_transcription,
             output_transcription=lv.output_transcription, resumption=lv.session_resumption,
@@ -143,9 +169,11 @@ class LiveTaraApp:
             working=WorkingMemory(), meeting_memory=self.memory, control=self.control, bus=bus,
             metrics=self.metrics, behaviour=self.behaviour, expressions=self.expressions,
             memory_gate=self.memory_gate,
-            params=LiveParams(floor_wait_ms=pr.floor_wait_ms, guidance_injection=pr.guidance_injection, hold_ms=lv.hold_ms, uplink_queue=lv.uplink_queue_chunks,
-                              reconnect_attempts=lv.reconnect_attempts, reconnect_backoff_s=lv.reconnect_backoff_s,
-                              local_barge_in=lv.local_barge_in, hybrid_end_of_speech=lv.hybrid_end_of_speech))
+            params=LiveParams(floor_wait_ms=pr.floor_wait_ms, guidance_injection=pr.guidance_injection, hold_ms=lv.hold_ms,
+                              uplink_queue=lv.uplink_queue_chunks, reconnect_attempts=lv.reconnect_attempts,
+                              reconnect_backoff_s=lv.reconnect_backoff_s, local_barge_in=lv.local_barge_in,
+                              hybrid_end_of_speech=lv.hybrid_end_of_speech,
+                              max_tool_calls_per_turn=settings.tools.max_calls_per_turn))
 
     async def start(self) -> None:
         context = ""
@@ -159,18 +187,27 @@ class LiveTaraApp:
         await self.engine.start(startup_context=context)
 
     async def close(self) -> None:
-        await self.engine.close()
-        if self._owns_memory and self.memory_service is not None:
+        try:
+            await self.engine.close()
+        finally:
             try:
-                await asyncio.wait_for(self.memory_service.close(), self.settings.memory.write_timeout_s)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - shutdown must finish; the failure is counted, never hidden
-                self.metrics.inc("memory_close_failures")
+                if self.orchestration is not None:
+                    await self.orchestration.close()
+            finally:
+                if self._owns_memory and self.memory_service is not None:
+                    try:
+                        await asyncio.wait_for(self.memory_service.close(), self.settings.memory.write_timeout_s)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001 - shutdown must finish; the failure is counted, never hidden
+                        self.metrics.inc("memory_close_failures")
 
     def health(self) -> dict[str, Any]:
         e = self.engine
-        return {"status": e.status, "epoch": e.epoch, "takeover": e.takeover_active, "muted": e.muted,
-                "playing": self.playback.is_playing, "model": self.settings.live.model, "profile": self.profile.value,
-                "key": "set" if self.settings.gemini.api_key else "missing",
-                "memory": "enabled" if self.memory_service is not None else "disabled"}
+        out = {"status": e.status, "epoch": e.epoch, "takeover": e.takeover_active, "muted": e.muted,
+               "playing": self.playback.is_playing, "model": self.settings.live.model, "profile": self.profile.value,
+               "key": "set" if self.settings.gemini.api_key else "missing",
+               "memory": "enabled" if self.memory_service is not None else "disabled"}
+        if self.orchestration is not None:
+            out["orchestration"] = self.orchestration.health()
+        return out

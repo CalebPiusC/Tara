@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 from .config import ToolSpec
 from .contracts import Passage, ToolCall, ToolResult
-from .errors import ProviderError
+from .errors import ProviderError, ToolError
 from .metrics import Metrics
 
 
@@ -34,6 +34,14 @@ class ToolDef:
     permission: str = ""           # informational label; the grant itself is the MeetingConfig tool list
     side_effect: bool = True       # conservative default
     live_write: bool = False       # code-owned exception: handler enforces its own explicit authorization
+    category: str = "general"
+    cost: str = "free"             # "free" | "metered" | "model"
+    latency: str = "fast"          # "fast" | "slow" | "background"
+    parameters_schema: dict[str, Any] | None = None   # explicit JSON schema when types alone are not enough
+
+
+def _json_type(t: type) -> str:
+    return {str: "STRING", int: "INTEGER", float: "NUMBER", bool: "BOOLEAN"}.get(t, "STRING")
 
 
 class ToolExecutor:
@@ -76,6 +84,29 @@ class ToolExecutor:
         d = self._reg.get(name)
         return d is not None and d.live_write
 
+    def catalog(self) -> list[dict[str, Any]]:
+        """Model-safe declarations plus operational metadata for telemetry and tests.
+
+        `describe` remains the stable minimal surface used by older callers; `catalog`
+        adds schemas, async/side-effect flags and cost/latency labels.  Neither method
+        reveals argument values or secrets.
+        """
+        out = []
+        for name in self._grants:
+            d = self._reg.get(name)
+            if d:
+                schema = d.parameters_schema or {
+                    "type": "OBJECT",
+                    "properties": {k: {"type": _json_type(t)} for k, t in {**d.required, **d.optional}.items()},
+                    "required": sorted(d.required),
+                }
+                out.append({"name": name, "description": d.description, "read_only": not d.side_effect,
+                            "side_effect": d.side_effect, "async": inspect.iscoroutinefunction(d.handler),
+                            "params": {k: t.__name__ for k, t in {**d.required, **d.optional}.items()},
+                            "required": sorted(d.required), "schema": schema, "timeout_s": d.timeout_s,
+                            "category": d.category, "cost": d.cost, "latency": d.latency})
+        return out
+
     async def execute_read_only(self, call: ToolCall, call_id: str) -> ToolResult:
         d = self._reg.get(call.name)
         if d is not None and d.side_effect:
@@ -103,21 +134,30 @@ class ToolExecutor:
                 if inspect.isawaitable(res):
                     res = await asyncio.wait_for(res, d.timeout_s)
         except TimeoutError:
-            return self._finish(call, call_id, t0, "timeout", error="tool_timeout")
+            return self._finish(call, call_id, t0, "timeout", error="tool_timeout", retryable=True)
         except asyncio.CancelledError:
             raise
+        except ToolError as e:
+            return self._finish(call, call_id, t0, f"error:{e.code}", error=e.code,
+                                details=e.details, retryable=e.retryable)
+        except ProviderError as e:
+            # Provider messages may contain request details; only the class is exposed.
+            return self._finish(call, call_id, t0, f"error:{type(e).__name__}",
+                                error=f"tool_error:{type(e).__name__}", retryable=True)
         except Exception as e:  # noqa: BLE001 - tool failure is reported, not hidden, never retried
             return self._finish(call, call_id, t0, f"error:{type(e).__name__}", error=f"tool_error:{type(e).__name__}")
         self._finish(call, call_id, t0, "executed")
         return ToolResult(True, output=res)
 
-    def _finish(self, call: ToolCall, call_id: str, t0: float, outcome: str, error: str | None = None) -> ToolResult:
+    def _finish(self, call: ToolCall, call_id: str, t0: float, outcome: str, error: str | None = None,
+                details: dict[str, Any] | None = None, retryable: bool = False) -> ToolResult:
         ms = (time.perf_counter() - t0) * 1000
-        self.audit.append({"call_id": call_id, "tool": call.name, "outcome": outcome, "ms": round(ms, 1)})
+        self.audit.append({"call_id": call_id, "tool": call.name, "outcome": outcome, "ms": round(ms, 1),
+                           "retryable": retryable})
         self.metrics.observe(f"tool_ms.{call.name}", ms)
         if error:
             self.metrics.inc("tool_failures")
-        return ToolResult(False, error=error)
+        return ToolResult(False, error=error, retryable=retryable, details=dict(details or {}))
 
     def _deny(self, call: ToolCall, call_id: str, why: str, pending: bool = False) -> ToolResult:
         self.audit.append({"call_id": call_id, "tool": call.name, "outcome": why})
@@ -133,7 +173,10 @@ class ToolExecutor:
         for k, v in args.items():
             if k not in allowed:
                 return f"unknown:{k}"
-            if not isinstance(v, allowed[k]) or (isinstance(v, bool) and allowed[k] is not bool):
+            expected = allowed[k]
+            if expected is float and isinstance(v, int) and not isinstance(v, bool):
+                continue
+            if not isinstance(v, expected) or (isinstance(v, bool) and expected is not bool):
                 return f"type:{k}"
         return None
 

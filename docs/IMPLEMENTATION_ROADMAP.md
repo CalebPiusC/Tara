@@ -38,7 +38,7 @@ Note: vector leg is introduced after the FTS baseline so each addition has measu
 The original Phase 2 (download and benchmark Whisper, Qwen, Kokoro) is **cancelled**. Replacement order:
 | Step | Objective | Exit |
 |---|---|---|
-| L0 (done, offline) | Live adapter, playback cancellation, gate, spoken controls, tools, notes, reconnect, memory interfaces, metrics | 389 offline tests (6 skipped); see [GEMINI_LIVE](GEMINI_LIVE.md) and [MEETING_CONTROLS](MEETING_CONTROLS.md) |
+| L0 (done, offline) | Live adapter, playback cancellation, gate, spoken controls, tools, notes, orchestration (time/location/weather/pages/research), reconnect, memory interfaces, metrics | offline suite green (see CHANGELOG.md); see [GEMINI_LIVE](GEMINI_LIVE.md), [MEETING_CONTROLS](MEETING_CONTROLS.md) and [ORCHESTRATION](ORCHESTRATION.md) |
 | L1 (smoke done 2026-10-20) | Real-service smoke test with the owner's key: connect, audio reply, sample rate | One text turn: 1771.9 ms connect, 1039.4 ms to first audio, 24 kHz, turn complete; full live behaviour suite not run |
 | L2 (adapter built, not yet run on hardware) | Local audio-device adapter (mic in, speakers out, headphones first) | `AudioDeviceAdapter` and `python -m tara.voice.demo` exist and are fake-backend tested; spoken conversation, real interruption and reconnect still need a real-device run; then tune `hold_ms`, silence duration, barge-in |
 | L3 | Google Meet transport spike (browser participant or vendor bot) | two-way audio proven in a real meeting, not mocks |
