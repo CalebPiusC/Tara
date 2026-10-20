@@ -93,8 +93,21 @@ def test_audio_flows_both_ways_through_real_chrome(tmp_path):
             # 1. meeting audio -> Tara: a 440 Hz tone from the other participant arrives as 16 kHz PCM with energy, labelled "a"
             await fake(ad, "window.__fake.setTone(true)")
             await until(lambda: any(e.kind is MeetingEventKind.AUDIO and rms16(e.payload["chunk"].data) > 0.05 for e in events), 15)
+            assert await fake(ad, "window.__fake.sinkOk") is True and await fake(ad, "window.__fake.sinkError || null") is None   # the page could pick the speaker it was offered
             loud = next(e for e in events if e.kind is MeetingEventKind.AUDIO and rms16(e.payload["chunk"].data) > 0.05)
             assert loud.payload["chunk"].sample_rate == 16000 and loud.payload["chunk"].stream_id == "a"
+            from tara.meet.bridge import AudioBridge
+            wire = await AudioBridge.stats(page_of(ad))                              # WebRTC's own numbers agree with the tap: speech-sized packets
+            assert wire["connections"] >= 1 and wire["inPackets"] > 0 and wire["inBytes"] > wire["inPackets"] * 20 and wire["tracks"] >= 1
+            for _ in range(40):                                                      # the level sampler runs every 200 ms
+                st = await AudioBridge.status(page_of(ad))
+                if st["wirePeak"] > 0.2:
+                    break
+                await asyncio.sleep(0.1)
+            dbg = await AudioBridge.debug(page_of(ad))                                # the run log's raw material
+            assert any("tap 1" in e["msg"] for e in dbg["events"]) and any("getUserMedia" in e["msg"] for e in dbg["events"])
+            assert dbg["inbound"] and dbg["inbound"][0]["packets"] > 0 and dbg["inbound"][0]["samples"] > 0
+            assert st["wirePeak"] > 0.2 and st["peakRms"] > 0.2 and st["tapInfo"] and st["tapInfo"][0]["paused"] is False   # RTP level agrees with the tap
             await fake(ad, "window.__fake.setTone(false)")
             # 2. Tara -> meeting: her speech becomes the microphone the far side measures
             assert await fake(ad, "window.__fake.micRms") < 0.01
@@ -209,4 +222,95 @@ def test_the_real_voice_engine_hears_the_meeting_and_speaks_into_it(tmp_path):
             assert max(heard) > 0.05
             await until(lambda: eng.playback.results, 10)                              # and her reply completes
         assert not list((tmp_path / "locks").glob("*.lock"))
+    run(go())
+
+
+def make_mode_adapter(tmp_path, audio):
+    ctrl = MeetController(tmp_path / "locks")
+
+    def factory(bridge):
+        return playwright_launcher(BrowserConfig(tmp_path / "profile", "chrome", headless=True), bridge,
+                                   setup=lambda ctx: serve(ctx, audio=audio))
+
+    return MeetAdapter(ctrl, factory, session_id="m1", interview_code="", url=URL, candidate_stream_id="a",
+                       worker_cfg=WorkerConfig(poll_s=0.1, admit_timeout_s=20, join_timeout_s=20), diag_s=0)
+
+
+@pytest.mark.parametrize("mode", ["webaudio", "element"])
+def test_audio_the_page_plays_itself_is_heard_too(tmp_path, mode):
+    """Meet may decode and play audio on its own instead of through WebRTC playout; the bridge must still hear it."""
+    async def go():
+        from tara.meet.bridge import AudioBridge
+        ad = make_mode_adapter(tmp_path, mode)
+        events: list = []
+        await ad.join(MeetingTarget(URL))
+        pump = asyncio.create_task(collect(ad, events))
+        try:
+            await fake(ad, "window.__fake.addParticipant('Alex Kim')")
+            await fake(ad, "window.__fake.setTone(true)")
+            await until(lambda: any(e.kind is MeetingEventKind.AUDIO and rms16(e.payload["chunk"].data) > 0.05 for e in events), 15)
+            for _ in range(30):
+                st = await AudioBridge.status(page_of(ad))
+                if st["routes"].get(mode, {}).get("peak", 0) > 0.2:
+                    break
+                await asyncio.sleep(0.1)
+            assert st["routes"][mode]["peak"] > 0.2                                   # the log can say which route carried it
+            await fake(ad, "window.__fake.setTone(false)")
+        finally:
+            await ad.leave()
+            await pump
+    run(go())
+
+
+def test_taras_own_voice_never_comes_back_through_monitors_or_self_views(tmp_path):
+    """The stand-in page monitors the microphone through its own audio context and shows a muted self-view, as Meet does."""
+    async def go():
+        ad = make_mode_adapter(tmp_path, "rtc")
+        events: list = []
+        await ad.join(MeetingTarget(URL))
+        pump = asyncio.create_task(collect(ad, events))
+        try:
+            await fake(ad, "window.__fake.addParticipant('Alex Kim')")
+            await asyncio.sleep(1.0)
+            start = len(events)
+            chunks = [PCMChunk(sine(ms=200), 24000, 0) for _ in range(5)]
+            receipt = await ad.send_audio("self", stream_of(chunks))
+            await asyncio.sleep(0.4)
+            heard = [rms16(e.payload["chunk"].data) for e in events[start:] if e.kind is MeetingEventKind.AUDIO]
+            assert receipt.completed and heard and max(heard) < 0.02                  # nothing of her own voice reached the inbound audio
+            from tara.meet.bridge import AudioBridge
+            routes = (await AudioBridge.status(page_of(ad)))["routes"]
+            assert "element" not in routes or routes["element"]["peak"] < 0.02       # the muted self-view was never captured
+        finally:
+            await ad.leave()
+            await pump
+    run(go())
+
+
+def test_devices_mode_hands_the_page_the_named_cable_and_taps_nothing(tmp_path):
+    """Chrome's own fake audio device stands in for a cable here (real cables need the driver installed)."""
+    async def go():
+        from tara.meet.bridge import AudioBridge
+        bridge = AudioBridge(lambda _b: None, "devices", {"mic": "Fake", "speaker": "Fake"})
+        cfg = BrowserConfig(tmp_path / "profile", "chrome", True, audio_mode="devices",
+                            extra_args=("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"))
+        page, close = await playwright_launcher(cfg, bridge, setup=lambda ctx: serve(ctx))()
+        try:
+            await page.goto(URL)
+            raw = page.raw
+            out = await raw.evaluate("""async () => {
+                const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true }, video: true });
+                const devs = await navigator.mediaDevices.enumerateDevices();
+                return { audio: s.getAudioTracks().map(t => t.label), video: s.getVideoTracks().length,
+                         kinds: devs.map(d => d.kind + ':' + d.label) , settings: s.getAudioTracks()[0].getSettings() };
+            }""")
+            st = await AudioBridge.status(raw)
+            assert out["audio"] and "Fake" in out["audio"][0] and out["video"] == 1               # the real device, not the in-page one
+            assert any(k.startswith("audioinput:") and "Fake" in k for k in out["kinds"]) and "videoinput:Tara camera" in out["kinds"]
+            assert not any(k.startswith("audioinput:Tara") for k in out["kinds"])                    # the in-page fake microphone is gone
+            assert out["settings"].get("echoCancellation") is False                                  # her voice is not processed
+            assert st["mode"] == "devices" and st["devices"]["mic"] and st["routes"] == {}            # nothing is tapped in this mode
+            assert (await raw.evaluate("window.__taraMode")) == "devices"
+        finally:
+            await close()
     run(go())

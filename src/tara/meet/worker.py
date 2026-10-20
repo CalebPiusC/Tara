@@ -211,9 +211,20 @@ class MeetWorker:
         await page.fill_name(c.bot_name)                                     # only filled when Meet asks for a name (guest)
         if await page.visible(sel.CAMERA_TOGGLE_ON):
             await page.click(sel.CAMERA_TOGGLE_ON)                           # camera off: audio-first, no video sent
-        clicked = await page.click_text(sel.JOIN_BUTTONS)
-        if not clicked:
+        clicked = ""
+        text = ""
+        for _ in range(8):                                                   # the page may still be loading: look a few times
+            clicked = await page.click_text(sel.JOIN_BUTTONS)
+            if clicked:
+                break
             text = await page.text()
+            if any(t in text for t in sel.DENIED_TEXT):
+                self._set(State.REJECTED, "Meet refused this visitor before it could ask to join. Sign the bot's Google account in "
+                                          "(`./dev.sh meet login`; check with `./dev.sh meet probe <link>`) and make sure the meeting "
+                                          "lets that account in")
+                return State.REJECTED
+            await c.sleep(c.poll_s)
+        if not clicked:
             if any(t in text for t in sel.SIGN_IN_TEXT):
                 self._set(State.FAILED, "the bot is not signed in; run `./dev.sh meet login` once")
             else:

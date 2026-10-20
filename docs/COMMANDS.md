@@ -106,8 +106,13 @@ Details: [INTERVIEWS](INTERVIEWS.md).
 ### Google Meet bot
 ```bash
 ./dev.sh meet check                                   # what is set up (no browser opened)
+./dev.sh meet probe <link>                            # open the meeting page with the bot profile and report what it sees; joins nothing
 ./dev.sh meet login                                   # open Chrome with the bot's profile so you sign the BOT's account in
-./dev.sh meet join <link or code> --interview <code>  # Tara joins as the bot, waits to be admitted, greets the candidate, runs the interview
+./dev.sh meet join <link> --audio devices             # use two virtual audio cables (BlackHole) instead of in-page taps
+./dev.sh meet join <link> --audio devices --half-duplex --address-only   # no echo loop on a speakerphone; she answers only to "Tara, ..."
+./dev.sh meet join <link or code>                     # a normal meeting: Tara joins as the bot, waits to be admitted, answers when you speak
+./dev.sh meet join <link> --address-only --transcripts # answer only when called by name; print what she heard and said
+./dev.sh meet join <link or code> --interview <code>  # an interview: greets the candidate by name and runs the questions
 ```
 Details and the exact first-test steps: [GOOGLE_MEET_BOT](GOOGLE_MEET_BOT.md). Not yet run in a real Meet.
 

@@ -23,6 +23,8 @@ CHROME_ARGS = (
     "--mute-audio",                                   # the bot machine must not play the meeting out loud; WebAudio taps are unaffected
     "--no-first-run", "--no-default-browser-check",
 )
+# Devices mode sends Chrome's sound to a virtual cable, and `--mute-audio` would silence that cable too, so it is left out.
+CHROME_ARGS_DEVICES = tuple(a for a in CHROME_ARGS if a != "--mute-audio")
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
@@ -32,6 +34,21 @@ class BrowserConfig:
     channel: str = "chrome"
     headless: bool = False
     viewport: tuple[int, int] = (1280, 800)
+    audio_mode: str = "page"                 # "page" (in-page taps) or "devices" (virtual audio cables)
+    extra_args: tuple[str, ...] = ()
+
+
+_ICON_NAME = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)+$")          # Material icon ligatures such as "frame_person" or "keep_outline"
+
+
+def real_names(raw: list[str]) -> list[str]:
+    """Keep what looks like a person's name: drop icon-font text, blanks and duplicates (order preserved)."""
+    seen: dict[str, None] = {}
+    for n in raw:
+        n = " ".join(str(n).split())
+        if n and not _ICON_NAME.match(n) and len(n) <= 80:
+            seen.setdefault(n, None)
+    return list(seen)
 
 
 class PlaywrightPage:
@@ -86,7 +103,7 @@ class PlaywrightPage:
         script = ("(s) => [...document.querySelectorAll(s)].map(e => (e.getAttribute('aria-label') || e.innerText || '')"
                   ".split('\\n')[0].trim()).filter(Boolean).slice(0, 60)")
         try:
-            return [str(x) for x in await self._p.evaluate(script, sel.PARTICIPANT_ITEMS)]
+            return real_names([str(x) for x in await self._p.evaluate(script, sel.PARTICIPANT_ITEMS)])
         except Exception:  # noqa: BLE001
             return []
 
@@ -107,9 +124,12 @@ def playwright_launcher(cfg: BrowserConfig, bridge: AudioBridge, origin: str = "
         pw = await async_playwright().start()
         try:
             ctx = await pw.chromium.launch_persistent_context(
-                str(cfg.profile_dir), channel=cfg.channel or None, headless=cfg.headless, args=list(CHROME_ARGS),
+                str(cfg.profile_dir), channel=cfg.channel or None, headless=cfg.headless, args=list(CHROME_ARGS_DEVICES if cfg.audio_mode == "devices" else CHROME_ARGS) + list(cfg.extra_args),
                 viewport={"width": cfg.viewport[0], "height": cfg.viewport[1]},
-                permissions=["microphone", "camera"])
+                permissions=["microphone", "camera"],
+                # Playwright starts Chrome with a mock keychain by default, which cannot decrypt the cookies a normal Chrome
+                # window saved when you signed the bot in. Use the real keychain so that sign-in is readable (macOS may ask once).
+                ignore_default_args=["--use-mock-keychain", "--password-store=basic"])
         except Exception as exc:
             await pw.stop()
             raise JoinError(f"could not start Chrome ({type(exc).__name__}); is Google Chrome installed and the profile folder free?") from exc

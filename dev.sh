@@ -26,9 +26,10 @@ if [ "${1:-}" = "meet" ]; then
   case "$sub" in
     check) exec .venv/bin/python -m tara.meet.run check ;;
     login) exec .venv/bin/python -m tara.meet.run login ;;
-    join)  link="${1:?usage: ./dev.sh meet join <meet link or code> --interview <code>}"; shift
+    probe) exec .venv/bin/python -m tara.meet.run probe "${1:?usage: ./dev.sh meet probe <meet link>}" ;;
+    join)  link="${1:?usage: ./dev.sh meet join <meet link or code> [--interview <code>] [--address-only] [--transcripts]}"; shift
            exec .venv/bin/python -m tara.meet.run join "$link" "$@" ;;
-    *)     echo "usage: ./dev.sh meet check | login | join <link> --interview <code>"; exit 2 ;;
+    *)     echo "usage: ./dev.sh meet check | login | probe <link> | join <link> --interview <code>"; exit 2 ;;
   esac
 fi
 

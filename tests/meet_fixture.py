@@ -26,7 +26,7 @@ HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Fake Meet</ti
   <ul id="plist" role="list" aria-label="Participants" style="display:none"></ul>
 </div>
 <script>
-const F = window.__fake = { cfg: { admit: false }, names: [], peopleOpen: false, micRms: 0, tone: null, remoteRms: 0, joined: false };
+const F = window.__fake = { cfg: { admit: false, audio: 'rtc' }, names: [], peopleOpen: false, micRms: 0, tone: null, remoteRms: 0, joined: false };
 const $ = (id) => document.getElementById(id);
 const show = (id) => { for (const x of ["prejoin","waiting","denied","ended","call"]) $(x).style.display = (x === id ? "block" : "none"); };
 function renderPeople() { const ul = $("plist"); ul.style.display = F.peopleOpen ? "block" : "none";
@@ -51,15 +51,32 @@ async function startMedia() {
   await a.setLocalDescription(await a.createOffer()); await b.setRemoteDescription(a.localDescription);
   await b.setLocalDescription(await b.createAnswer()); await a.setRemoteDescription(b.localDescription);
   setInterval(() => { an.getFloatTimeDomainData(buf); let s = 0; for (const v of buf) s += v * v; F.micRms = Math.sqrt(s / buf.length); }, 50);
-  // The "other participant": a tone sent to the bot through a normal (wrapped) connection, like Meet's incoming audio
-  const rin = new RTCPeerConnection({ iceServers: [] }), rsend = new RTCPeerConnection({ iceServers: [], __taraIgnore: true });
-  rin.onicecandidate = (e) => e.candidate && rsend.addIceCandidate(e.candidate); rsend.onicecandidate = (e) => e.candidate && rin.addIceCandidate(e.candidate);
-  rin.ontrack = (e) => { const el = new Audio(); el.srcObject = new MediaStream([e.track]); el.muted = true; el.play().catch(()=>{}); };
+  // The "other participant": audible tone, delivered the way the chosen mode says. rtc: a normal incoming WebRTC track (like Meet's
+  // standard path). webaudio: the page decodes audio itself and plays it through its own AudioContext (no RTC playout at all).
+  // element: the page plays a generated stream in a media element.
   const oc = new AudioContext(); const osc = oc.createOscillator(); osc.frequency.value = 440; const g = oc.createGain(); g.gain.value = 0;
-  const dst = oc.createMediaStreamDestination(); osc.connect(g); g.connect(dst); osc.start(); F.tone = { gain: g };
-  dst.stream.getTracks().forEach(t => rsend.addTrack(t, dst.stream));
-  await rsend.setLocalDescription(await rsend.createOffer()); await rin.setRemoteDescription(rsend.localDescription);
-  await rin.setLocalDescription(await rin.createAnswer()); await rsend.setRemoteDescription(rin.localDescription);
+  osc.connect(g); osc.start(); F.tone = { gain: g };
+  if (F.cfg.audio === 'webaudio') {
+    g.connect(oc.destination);
+  } else if (F.cfg.audio === 'element') {
+    const dst = oc.createMediaStreamDestination(); g.connect(dst);
+    const el = new Audio(); el.srcObject = dst.stream; el.play().catch(() => {});
+  } else {
+    const rin = new RTCPeerConnection({ iceServers: [] }), rsend = new RTCPeerConnection({ iceServers: [], __taraIgnore: true });
+    rin.onicecandidate = (e) => e.candidate && rsend.addIceCandidate(e.candidate); rsend.onicecandidate = (e) => e.candidate && rin.addIceCandidate(e.candidate);
+    // Like Meet: send playback to the output device the page lists, and only start playing if that worked.
+    rin.ontrack = async (e) => { const el = new Audio(); el.srcObject = new MediaStream([e.track]); el.muted = true;
+      try { const d = (await navigator.mediaDevices.enumerateDevices()).find(x => x.kind === 'audiooutput');
+            if (d) await el.setSinkId(d.deviceId); F.sinkOk = true; await el.play(); } catch (err) { F.sinkError = err.name; } };
+    const dst = oc.createMediaStreamDestination(); g.connect(dst);
+    dst.stream.getTracks().forEach(t => rsend.addTrack(t, dst.stream));
+    await rsend.setLocalDescription(await rsend.createOffer()); await rin.setRemoteDescription(rsend.localDescription);
+    await rin.setLocalDescription(await rin.createAnswer()); await rsend.setRemoteDescription(rin.localDescription);
+  }
+  // A self-view like Meet's: a muted preview of the bot's own microphone. It must never be tapped (that would be an echo of Tara).
+  const self = document.createElement('video'); self.muted = true; self.srcObject = mic; self.play().catch(() => {});
+  // A page that monitors the microphone through its own audio context (a level meter wired to the destination at zero gain is common).
+  const mctx = new AudioContext(); const msrc = mctx.createMediaStreamSource(mic); const mg = mctx.createGain(); mg.gain.value = 1; msrc.connect(mg); mg.connect(mctx.destination);
   F.joined = true;
 }
 $("join").onclick = async () => {
@@ -70,9 +87,9 @@ $("leave").onclick = () => { show("ended"); };
 </script></body></html>"""
 
 
-async def serve(ctx: Any, *, admit: bool = False) -> None:
+async def serve(ctx: Any, *, admit: bool = False, audio: str = "rtc") -> None:
     """Route the Meet URL to the stand-in for every page of this browser context."""
-    page_html = HTML.replace("admit: false", f"admit: {'true' if admit else 'false'}")
+    page_html = HTML.replace("admit: false, audio: 'rtc'", f"admit: {'true' if admit else 'false'}, audio: '{audio}'")
 
     async def handler(route: Any) -> None:
         await route.fulfill(status=200, content_type="text/html", body=page_html)

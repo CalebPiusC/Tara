@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from collections.abc import Callable
 from importlib.resources import files
 from typing import Any
@@ -16,13 +17,19 @@ IN_RATE = 16000
 MAX_PLAY_BYTES = 480_000          # about 10 s at 24 kHz; callers send chunks far smaller than this
 
 
-def bridge_js() -> str:
-    return files("tara.meet").joinpath("bridge.js").read_text(encoding="utf-8")
+def bridge_js(mode: str = "page", devices: dict[str, str] | None = None) -> str:
+    """The bridge script. `mode="devices"` points the page at two virtual audio cables (names given in `devices`: mic, speaker)."""
+    body = files("tara.meet").joinpath("bridge.js").read_text(encoding="utf-8")
+    if mode != "devices":
+        return body
+    cfg = json.dumps({"mic": (devices or {}).get("mic", ""), "speaker": (devices or {}).get("speaker", "")})
+    return f'window.__taraMode = "devices"; window.__taraDevices = {cfg};\n' + body
 
 
 class AudioBridge:
-    def __init__(self, on_audio: Callable[[bytes], None]):
+    def __init__(self, on_audio: Callable[[bytes], None], mode: str = "page", devices: dict[str, str] | None = None):
         self._on_audio = on_audio
+        self.mode, self.devices = mode, devices
         self.frames_in = 0
         self.bytes_in = 0
         self.bad_frames = 0
@@ -30,7 +37,7 @@ class AudioBridge:
     async def attach(self, context: Any) -> None:
         """Install on a browser context BEFORE any page loads: the init script wraps WebRTC and getUserMedia first."""
         await context.expose_function("__taraAudioIn", self._receive)
-        await context.add_init_script(script=bridge_js())
+        await context.add_init_script(script=bridge_js(self.mode, self.devices))
 
     def _receive(self, data: str) -> None:
         try:
@@ -58,6 +65,18 @@ class AudioBridge:
     async def stop(page: Any) -> int:
         """Cancel everything queued. Returns the milliseconds that were actually played."""
         return int(await page.evaluate("() => window.__taraStop()"))
+
+    @staticmethod
+    async def stats(page: Any) -> dict[str, Any]:
+        """WebRTC's own view of the meeting audio (packets, energy, level), independent of the Web Audio tap."""
+        out = await page.evaluate("() => (window.__taraStats ? window.__taraStats() : null)")
+        return dict(out) if out else {}
+
+    @staticmethod
+    async def debug(page: Any) -> dict[str, Any]:
+        """What Meet did with its audio (new events since the last call) and WebRTC's per-stream counters, for the run log."""
+        out = await page.evaluate("() => (window.__taraDebug ? window.__taraDebug() : null)")
+        return dict(out) if out else {}
 
     @staticmethod
     async def status(page: Any) -> dict[str, Any]:

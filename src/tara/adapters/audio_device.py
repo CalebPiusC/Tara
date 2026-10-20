@@ -11,6 +11,7 @@ unchanged.
 """
 from __future__ import annotations
 
+import array
 import asyncio
 import itertools
 import threading
@@ -43,25 +44,54 @@ class AudioBackend(Protocol):
 class SoundDeviceBackend:
     """Lazy sounddevice wrapper. The SDK is an optional audio extra, not a model."""
 
-    def __init__(self) -> None:
-        try:
-            import sounddevice as sd
-        except ImportError as exc:  # pragma: no cover - exercised only without the extra
-            raise JoinError("sounddevice is not installed; install with `pip install -e '.[audio]'`") from exc
-        self._sd = sd
+    def __init__(self, input_device: str | int | None = None, output_device: str | int | None = None, sd_module: Any = None) -> None:
+        """`input_device` / `output_device` pick a specific device by name (a part of the name is enough) or index; None means the default."""
+        if sd_module is None:
+            try:
+                import sounddevice
+            except ImportError as exc:  # pragma: no cover - exercised only without the extra
+                raise JoinError("sounddevice is not installed; install with `pip install -e '.[audio]'`") from exc
+            sd_module = sounddevice
+        self._sd = sd_module
+        self._in = self._resolve(input_device, "input") if input_device is not None else None
+        self._out = self._resolve(output_device, "output") if output_device is not None else None
+
+    def _resolve(self, device: str | int, kind: str) -> int:
+        if isinstance(device, int):
+            return device
+        key = "max_input_channels" if kind == "input" else "max_output_channels"
+        for i, d in enumerate(self._sd.query_devices()):
+            if device.lower() in str(d["name"]).lower() and int(d[key]) > 0:
+                return i
+        raise JoinError(f"no {kind} audio device matching {device!r}")
 
     def open_input(self, *, callback: Any, samplerate: int, channels: int, dtype: str, blocksize: int) -> Any:
+        kw: dict[str, Any] = {} if self._in is None else {"device": self._in}
         return self._sd.RawInputStream(samplerate=samplerate, channels=channels, dtype=dtype, blocksize=blocksize,
-                                       callback=callback)
+                                       callback=callback, **kw)
 
     def open_output(self, *, samplerate: int, channels: int, dtype: str) -> Any:
-        return self._sd.RawOutputStream(samplerate=samplerate, channels=channels, dtype=dtype)
+        kw: dict[str, Any] = {} if self._out is None else {"device": self._out}
+        return self._sd.RawOutputStream(samplerate=samplerate, channels=channels, dtype=dtype, **kw)
 
     def default_output_rate(self) -> int:
         try:
-            return int(self._sd.query_devices(kind="output")["default_samplerate"])
+            q = self._sd.query_devices(self._out) if self._out is not None else self._sd.query_devices(kind="output")
+            return int(q["default_samplerate"])
         except Exception:  # noqa: BLE001 - fall back to the provider's rate
             return OUT_RATE
+
+
+def expand_channels(pcm: bytes, channels: int) -> bytes:
+    """Copy mono PCM16 into every channel of an interleaved stream."""
+    if channels <= 1 or not pcm:
+        return pcm
+    mono = array.array("h")
+    mono.frombytes(pcm)
+    out = array.array("h", [0]) * (len(mono) * channels)
+    for c in range(channels):
+        out[c::channels] = mono
+    return out.tobytes()
 
 
 @dataclass
@@ -120,12 +150,13 @@ class AudioDeviceAdapter:
 
     def __init__(self, backend: AudioBackend | None = None, *, stream_id: str = "you", mic_rate: int = MIC_RATE,
                  out_rate: int = OUT_RATE, blocksize: int = MIC_BLOCK, queue_chunks: int = 100,
-                 half_duplex: bool = False):
+                 half_duplex: bool = False, out_channels: int = 1):
         self.capabilities = AdapterCapabilities(per_participant_audio=True, delivery_confirmation=True,
                                                 can_mute_self=False, can_camera=False, can_show_image=False,
                                                 can_mute_others=False)
         self.stream_id = stream_id
         self.mic_rate, self.out_rate, self.blocksize = mic_rate, out_rate, blocksize
+        self.out_channels = max(1, out_channels)     # a virtual cable often wants stereo: the mono voice is copied to every channel
         self.half_duplex = half_duplex          # speaker mode: mic sends silence while Tara speaks (no echo)
         self._backend = backend
         self._queue: asyncio.Queue[MeetingEvent | None] = asyncio.Queue(maxsize=queue_chunks)
@@ -172,7 +203,7 @@ class AudioDeviceAdapter:
         # Probe the output now so a missing/busy speaker device fails at start, not on the first reply.
         probe: Any | None = None
         try:
-            probe = backend.open_output(samplerate=self.out_rate, channels=1, dtype="int16")
+            probe = backend.open_output(samplerate=self.out_rate, channels=self.out_channels, dtype="int16")
             probe.start()
             probe.stop()
         except Exception as exc:
@@ -264,7 +295,7 @@ class AudioDeviceAdapter:
             return DeliveryReceipt(utterance_id, 0, False)
         stream = None
         try:
-            stream = self._backend.open_output(samplerate=self.out_rate, channels=1, dtype="int16")
+            stream = self._backend.open_output(samplerate=self.out_rate, channels=self.out_channels, dtype="int16")
             stream.start()
             state.stream = stream
         except Exception:  # noqa: BLE001 - playback failure is reported, never assumed
@@ -288,6 +319,8 @@ class AudioDeviceAdapter:
                     continue
                 if chunk.sample_rate != self.out_rate:
                     data = resample_pcm16(data, chunk.sample_rate, self.out_rate)
+                if self.out_channels > 1:
+                    data = expand_channels(data, self.out_channels)
                 try:
                     written = await asyncio.to_thread(_write, state, data)
                 except Exception:  # noqa: BLE001 - a broken sink ends this response only

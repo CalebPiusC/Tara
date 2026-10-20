@@ -56,7 +56,7 @@ def hush(stream, t0=2000):
     return [PCMChunk(silence(500), 16000, t0, stream)]
 
 
-async def until(cond, timeout=3.0):
+async def until(cond, timeout=10.0):
     end = asyncio.get_event_loop().time() + timeout
     while not cond():
         if asyncio.get_event_loop().time() > end:

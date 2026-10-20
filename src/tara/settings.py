@@ -174,6 +174,10 @@ class MeetSettings:
     admit_timeout_s: float = 600.0              # how long to wait in the waiting room for a person to admit the bot
     join_timeout_s: float = 60.0
     reconnects: int = 3
+    audio: str = "page"                         # "page" (taps inside the page) or "devices" (two virtual audio cables, the route other bots use)
+    in_device: str = "BlackHole 2ch"            # devices mode: Chrome's speaker, read by Tara
+    out_device: str = "BlackHole 16ch"          # devices mode: Tara's voice, Chrome's microphone
+    half_duplex: bool = False                   # silence the meeting audio while Tara speaks (stops her hearing her own voice back; no voice interruption)
 
 
 @dataclass(frozen=True)
@@ -313,7 +317,9 @@ class RuntimeSettings:
                 headless=_bool(e.get("TARA_MEET_HEADLESS"), False),
                 admit_timeout_s=_num(e, "TARA_MEET_ADMIT_TIMEOUT_S", MeetSettings.admit_timeout_s),
                 join_timeout_s=_num(e, "TARA_MEET_JOIN_TIMEOUT_S", MeetSettings.join_timeout_s),
-                reconnects=_num(e, "TARA_MEET_RECONNECTS", MeetSettings.reconnects, int)),
+                reconnects=_num(e, "TARA_MEET_RECONNECTS", MeetSettings.reconnects, int),
+                audio=e.get("TARA_MEET_AUDIO", "page").strip().lower() or "page", half_duplex=_bool(e.get("TARA_MEET_HALF_DUPLEX"), False),
+                in_device=e.get("TARA_MEET_IN_DEVICE", MeetSettings.in_device).strip(), out_device=e.get("TARA_MEET_OUT_DEVICE", MeetSettings.out_device).strip()),
             work=WorkSettings(
                 enabled=_bool(e.get("TARA_WORK_ENABLED"), False), dir=e.get("TARA_WORK_DIR", "./work"),
                 auto_memory=e.get("TARA_AUTO_MEMORY", "candidate").strip().lower(),
@@ -454,6 +460,10 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
         err("TARA_MEET_ADMIT_TIMEOUT_S", "join timeout must be 5 to 300 s and admit timeout 10 to 3600 s")
     if not 0 <= mt.reconnects <= 10:
         err("TARA_MEET_RECONNECTS", "must be between 0 and 10")
+    if mt.audio not in ("page", "devices"):
+        err("TARA_MEET_AUDIO", "must be page or devices")
+    if mt.audio == "devices" and (not mt.in_device or not mt.out_device or mt.in_device == mt.out_device):
+        err("TARA_MEET_IN_DEVICE", "devices mode needs two different cables (a single loopback would feed the meeting back into itself)")
     wk = s.work
     if wk.enabled:
         if wk.auto_memory not in ("off", "candidate"):
