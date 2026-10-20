@@ -54,3 +54,10 @@ R1-R7 are listed with what each established in [RAG_TECHNOLOGY_EVALUATION.md](RA
 | L10 | https://ai.google.dev/gemini-api/docs/speech-generation | TTS style field, `<laugh>`/`<sigh>`/pause tags, 30 prebuilt voices; states TTS is distinct from the Live API and does not say these controls apply to Live |
 | L2 (re-read) | https://ai.google.dev/gemini-api/docs/live-guide | affective dialog and proactive audio sections; no coverage of tone, accent or non-verbal control for Live; `send_client_content` supported through the session |
 | SDK | google-genai 2.31.0 `LiveConnectConfig` field help: `enable_affective_dialog` "detect emotions and adapt" (not valid on 3.8 Live per L9), `proactivity`, `thinking_config` | local introspection |
+
+## Assistant memory design (accessed 2026-10-21; search-tool summaries, not full reads)
+| # | Source | Established |
+|---|---|---|
+| M1 | https://help.openai.com/en/articles/8590148-memory-faq | ChatGPT keeps saved memories it may add on its own or on request; users can view, delete or turn off; the page says it describes a legacy experience |
+| M2 | https://help.openai.com/en/articles/11146739-how-does-reference-saved-memories-work | automatic reference to past chat history, separate toggle, not every detail is kept |
+| M3 | https://www.tomsguide.com/ai/claude-just-unlocked-memory-that-syncs-with-chatgpt-heres-how-it-works | reported: Claude memory is separated per project; third-party report, no official Anthropic page was read, so the mechanism is unverified |

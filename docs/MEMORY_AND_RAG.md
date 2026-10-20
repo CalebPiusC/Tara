@@ -18,7 +18,7 @@
 The Live path sends no database query per audio chunk. It performs one bounded startup query, and tool calls run on the engine's existing tool task, not on the audio or playback paths.
 
 ## What is still only design
-- **Automatic memory extraction / consolidation:** no model call extracts facts after a turn; only explicit requests are stored.
+- **Automatic memory:** implemented by ADR-0015 (transcript chunks, summary, verified candidate facts, meeting scope, retention). Embedding or vector search and cross-meeting consolidation are still not built.
 - **Document RAG:** no ingestion, chunking, document versions, embeddings or pgvector columns.
 - **Hybrid retrieval:** v1 is PostgreSQL full-text search plus an `ILIKE` fallback; no vector leg, reranker or RRF.
 - **Redis:** not used; the single-process app has no measured need for it yet.

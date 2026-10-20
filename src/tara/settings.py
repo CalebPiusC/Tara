@@ -7,6 +7,7 @@ Nothing here loads a model or touches the network. `validate` only inspects valu
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,11 +114,48 @@ class MemorySettings:
     enabled: bool = False
     database_url: str = field(default="", repr=False)  # never shown in repr or logs
     search_limit: int = 5
-    context_max_chars: int = 1200          # startup block cap; token estimate is chars/4
+    context_max_chars: int = 3500          # startup block cap; token estimate is chars/4
     startup_context: bool = True           # inject recent memories when a live session opens
     write_timeout_s: float = 3.0
     recall_timeout_s: float = 2.0
     schema: str = ""                       # optional; tests use a per-run schema
+
+
+@dataclass(frozen=True)
+class WorkSettings:
+    """Secretary, interviewing and document generation (docs/WORKFLOWS.md). Off by default."""
+
+    enabled: bool = False
+    dir: str = "./work"                      # inbox, candidates, interviews, documents live here
+    auto_memory: str = "candidate"           # off | candidate (auto-saves are candidates with expiry, never confirmed)
+    auto_memory_ttl_days: int = 30
+    hiring: bool = True                      # interview tools (only registered when enabled)
+    documents: bool = True                   # document tools
+    github_token: str = field(default="", repr=False)   # optional; raises the GitHub limit from 60 to 5,000 per hour
+    github_max_repos: int = 6
+    doc_font: str = "Calibri"
+    doc_font_heading: str = "Calibri"
+    doc_font_size: float = 11.0
+    doc_accent: str = "1F4E79"               # hex RGB
+    pdf_font_regular: str = ""               # TTF paths for Unicode PDFs; empty = auto-detect, then Helvetica
+    pdf_font_bold: str = ""
+    pdf_font_italic: str = ""
+    job_timeout_s: float = 60.0
+    max_jobs: int = 2
+    auto_minutes: bool = True                # at meeting end, save a minutes file and a long-term summary of confirmed items
+    auto_record: bool = True                 # keep the meeting automatically: transcript chunks, summary, candidate facts
+    hiring_model: str = ""                  # text model for reading CVs and writing questions (empty = TARA_RECORDER_MODEL, then TARA_LLM_MODEL)
+    meeting_type: str = "general"           # general | standup | one_on_one | retro | client_call | brainstorm
+    opening_brief: bool = True               # when a continuing section starts, Tara says what was left open
+    nudges: bool = True                      # spoken time nudges when an agenda with a length is set
+    vocab_file: str = ""                      # names and jargon, one per line (empty = <work dir>/vocabulary.txt)
+    vocab_terms: str = ""                     # extra comma-separated terms
+    recorder_model: str = ""                # fast text model for summaries (empty = TARA_LLM_MODEL); a lite model is faster
+    digest_timeout_s: float = 45.0           # how long to wait for a summary at checkpoints and at the end
+    chunk_turns: int = 6                     # turns per stored transcript chunk
+    episode_retention_days: int = 90         # stored transcript chunks are deleted after this
+    fact_retention_days: int = 180           # unconfirmed extracted facts expire after this
+    recall_nudges: bool = True               # quiet "we confirmed this earlier" notes to the model (never spoken unprompted)
 
 
 @dataclass(frozen=True)
@@ -133,11 +171,11 @@ class ToolSettings:
     calculator: bool = True
     location: bool = True
     weather: bool = True
-    search: bool = False               # requires a subscription token
+    search: bool = False               # requires a provider key (Brave or Tavily)
     fetch: bool = True                 # public URL reading; SSRF checks always apply
     research: bool = True              # only registered when search + fetch are available
     background: bool = True
-    search_provider: str = "brave"
+    search_provider: str = "brave"      # brave | tavily
     search_api_key: str = field(default="", repr=False)
     weather_base_url: str = "https://api.open-meteo.com/v1/forecast"
     geocoding_base_url: str = "https://geocoding-api.open-meteo.com/v1"
@@ -187,6 +225,7 @@ class RuntimeSettings:
     live: LiveSettings = field(default_factory=LiveSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
+    work: WorkSettings = field(default_factory=WorkSettings)
     persona: PersonaSettings = field(default_factory=PersonaSettings)
     behavior: BehaviorSettings = field(default_factory=BehaviorSettings)
 
@@ -249,6 +288,32 @@ class RuntimeSettings:
                 write_timeout_s=_num(e, "TARA_MEMORY_WRITE_TIMEOUT_S", MemorySettings.write_timeout_s),
                 recall_timeout_s=_num(e, "TARA_MEMORY_RECALL_TIMEOUT_S", MemorySettings.recall_timeout_s),
                 schema=e.get("TARA_MEMORY_SCHEMA", "")),
+            work=WorkSettings(
+                enabled=_bool(e.get("TARA_WORK_ENABLED"), False), dir=e.get("TARA_WORK_DIR", "./work"),
+                auto_memory=e.get("TARA_AUTO_MEMORY", "candidate").strip().lower(),
+                auto_memory_ttl_days=_num(e, "TARA_AUTO_MEMORY_TTL_DAYS", WorkSettings.auto_memory_ttl_days, int),
+                hiring=_bool(e.get("TARA_HIRING_ENABLED"), True), documents=_bool(e.get("TARA_DOCS_ENABLED"), True),
+                github_token=e.get("TARA_GITHUB_TOKEN", ""),
+                github_max_repos=_num(e, "TARA_GITHUB_MAX_REPOS", WorkSettings.github_max_repos, int),
+                doc_font=e.get("TARA_DOC_FONT", "Calibri"), doc_font_heading=e.get("TARA_DOC_FONT_HEADING", "Calibri"),
+                doc_font_size=_num(e, "TARA_DOC_FONT_SIZE", WorkSettings.doc_font_size),
+                doc_accent=e.get("TARA_DOC_ACCENT", "1F4E79").strip().lstrip("#"),
+                pdf_font_regular=e.get("TARA_PDF_FONT_REGULAR", ""), pdf_font_bold=e.get("TARA_PDF_FONT_BOLD", ""),
+                pdf_font_italic=e.get("TARA_PDF_FONT_ITALIC", ""),
+                job_timeout_s=_num(e, "TARA_JOB_TIMEOUT_S", WorkSettings.job_timeout_s),
+                max_jobs=_num(e, "TARA_MAX_JOBS", WorkSettings.max_jobs, int),
+                auto_minutes=_bool(e.get("TARA_AUTO_MINUTES"), True),
+                auto_record=_bool(e.get("TARA_AUTO_RECORD"), True),
+                hiring_model=e.get("TARA_HIRING_MODEL", "").strip(),
+                meeting_type=e.get("TARA_MEETING_TYPE", "general").strip() or "general",
+                opening_brief=_bool(e.get("TARA_OPENING_BRIEF"), True), nudges=_bool(e.get("TARA_NUDGES"), True),
+                vocab_file=e.get("TARA_VOCAB_FILE", "").strip(), vocab_terms=e.get("TARA_VOCAB", ""),
+                recorder_model=e.get("TARA_RECORDER_MODEL", "").strip(),
+                digest_timeout_s=_num(e, "TARA_DIGEST_TIMEOUT_S", WorkSettings.digest_timeout_s),
+                chunk_turns=_num(e, "TARA_CHUNK_TURNS", WorkSettings.chunk_turns, int),
+                episode_retention_days=_num(e, "TARA_EPISODE_RETENTION_DAYS", WorkSettings.episode_retention_days, int),
+                fact_retention_days=_num(e, "TARA_FACT_RETENTION_DAYS", WorkSettings.fact_retention_days, int),
+                recall_nudges=_bool(e.get("TARA_RECALL_NUDGES"), True)),
             tools=ToolSettings(
                 enabled=_bool(e.get("TARA_TOOLS_ENABLED"), True),
                 time=_bool(e.get("TARA_TOOLS_TIME"), True),
@@ -299,7 +364,9 @@ class RuntimeSettings:
         mem = self.memory
         tools = {k: v for k, v in t.__dict__.items() if k != "search_api_key"}
         tools["search_api_key"] = "set" if t.search_api_key else "missing"
-        return {"persona": self.persona.__dict__, "live": self.live.__dict__, "models": self.models.__dict__,
+        work = {k: v for k, v in self.work.__dict__.items() if k != "github_token"}
+        work["github_token"] = "set" if self.work.github_token else "none"
+        return {"work": work, "persona": self.persona.__dict__, "live": self.live.__dict__, "models": self.models.__dict__,
                 "inference": self.inference.__dict__, "limits": self.limits.__dict__, "tools": tools,
                 "gemini": {"enabled": g.enabled, "model": g.model, "api_key": "set" if g.api_key else "missing"},
                 "memory": {"enabled": mem.enabled, "database_url": "set" if mem.database_url else "missing",
@@ -347,9 +414,42 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
             err("TARA_LIVE_*", "hold_ms >= 0 and queue sizes >= 1")
         if not lv.context_compression and lv.session_resumption is False:
             warn("TARA_LIVE_COMPRESSION", "without compression audio-only sessions end after about 15 minutes (docs)")
+    wk = s.work
+    if wk.enabled:
+        if wk.auto_memory not in ("off", "candidate"):
+            err("TARA_AUTO_MEMORY", "must be 'off' or 'candidate'")
+        if not wk.dir.strip():
+            err("TARA_WORK_DIR", "must not be empty")
+        if not 1 <= wk.auto_memory_ttl_days <= 365:
+            err("TARA_AUTO_MEMORY_TTL_DAYS", "must be between 1 and 365")
+        if not 1 <= wk.github_max_repos <= 12:
+            err("TARA_GITHUB_MAX_REPOS", "must be between 1 and 12")
+        if not 6 <= wk.doc_font_size <= 20:
+            err("TARA_DOC_FONT_SIZE", "must be between 6 and 20")
+        if not re.fullmatch(r"[0-9A-Fa-f]{6}", wk.doc_accent):
+            err("TARA_DOC_ACCENT", "must be a 6-digit hex colour such as 1F4E79")
+        if not 5 <= wk.job_timeout_s <= 600:
+            err("TARA_JOB_TIMEOUT_S", "must be between 5 and 600 seconds")
+        try:
+            from .meetings.types import parse_type
+            parse_type(wk.meeting_type)
+        except ValueError as exc:
+            err("TARA_MEETING_TYPE", str(exc))
+        if not 5 <= wk.digest_timeout_s <= 180:
+            err("TARA_DIGEST_TIMEOUT_S", "must be between 5 and 180 seconds")
+        if not 2 <= wk.chunk_turns <= 40:
+            err("TARA_CHUNK_TURNS", "must be between 2 and 40")
+        if not 1 <= wk.episode_retention_days <= 3650 or not 1 <= wk.fact_retention_days <= 3650:
+            err("TARA_EPISODE_RETENTION_DAYS", "retention must be between 1 and 3650 days")
+        if not 1 <= wk.max_jobs <= 8:
+            err("TARA_MAX_JOBS", "must be between 1 and 8")
+        if (wk.documents or wk.hiring) and not g.model:
+            warn("TARA_LLM_MODEL", "no text model id set: documents and interview plans fall back to plain templates")
+        if (wk.documents or wk.hiring) and g.model and not g.api_key:
+            warn("GEMINI_API_KEY", "a text model id is set but there is no key: documents and plans fall back to templates")
     if ts.enabled:
-        if ts.search_provider != "brave":
-            err("TARA_SEARCH_PROVIDER", "only 'brave' is implemented")
+        if ts.search_provider not in ("brave", "tavily"):
+            err("TARA_SEARCH_PROVIDER", "must be 'brave' or 'tavily'")
         if ts.search and not ts.search_api_key:
             err("TARA_SEARCH_API_KEY", "required when TARA_TOOLS_SEARCH is on")
         if not ts.user_agent.strip():

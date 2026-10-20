@@ -28,6 +28,10 @@ class HttpClient(Protocol):
                   headers: Mapping[str, str] | None = None, timeout_s: float = 8.0,
                   max_bytes: int = 1_000_000) -> HttpResponse: ...
 
+    async def post(self, url: str, *, json_body: Mapping[str, Any] | None = None,
+                   headers: Mapping[str, str] | None = None, timeout_s: float = 8.0,
+                   max_bytes: int = 1_000_000) -> HttpResponse: ...
+
 
 # ---- search / retrieval ---------------------------------------------------
 @dataclass(frozen=True)

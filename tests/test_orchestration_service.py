@@ -14,6 +14,7 @@ from tara.orchestration import Orchestration
 from tara.orchestration.contracts import CountryFacts
 from tara.orchestration.http import StdlibHttpClient
 from tara.orchestration.places import OpenMeteoGeocoder
+from tara.orchestration.search import TavilySearchProvider
 from tara.orchestration.weather import OpenMeteoWeather
 from tara.settings import RuntimeSettings, ToolSettings, validate
 from tara.tools import ToolDef, ToolExecutor
@@ -34,6 +35,14 @@ def test_tool_settings_validate_search_key_and_redact_it():
     assert ok.tools.search is True
     assert "search-secret" not in repr(ok) and "search-secret" not in json.dumps(ok.redacted())
     assert ok.redacted()["tools"]["search_api_key"] == "set"
+
+
+def test_tool_settings_search_provider_must_be_known():
+    env = {**LIVE, "TARA_TOOLS_SEARCH": "1", "TARA_SEARCH_API_KEY": "k", "TARA_SEARCH_PROVIDER": "bing"}
+    errors = {i.field for i in validate(RuntimeSettings.from_env(env)) if i.severity == "error"}
+    assert "TARA_SEARCH_PROVIDER" in errors
+    ok = RuntimeSettings.from_env({**env, "TARA_SEARCH_PROVIDER": "tavily"})
+    assert ok.tools.search_provider == "tavily"
 
 
 def test_tool_settings_reject_bad_urls_and_limits():
@@ -66,6 +75,16 @@ def test_orchestration_with_search_exposes_search_and_background_tasks():
     assert {"web_search", "fetch_url", "research", "start_research"} <= names
     assert orchestration.health()["search"] == "configured"
     assert orchestration.tasks is not None
+    asyncio.run(orchestration.close())
+
+
+def test_orchestration_builds_the_configured_search_provider_without_network():
+    settings = ToolSettings(enabled=True, search=True, search_provider="tavily", search_api_key="tvly-not-used",
+                            fetch=False, research=False, background=False)
+    orchestration = Orchestration(settings, session_id="s", tenant_id="t", meeting_id="m")
+    assert isinstance(orchestration.search, TavilySearchProvider)
+    assert "web_search" in {d.name for d in orchestration.tool_defs}
+    assert orchestration.health()["search"] == "configured"
     asyncio.run(orchestration.close())
 
 

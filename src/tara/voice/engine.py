@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +33,7 @@ from ..errors import FatalProviderError, ProviderError, SessionLimitExceeded  # 
 from ..identity import ParticipantRegistry
 from ..memory.intent import MemoryWriteGate
 from ..metrics import Metrics
-from ..participation import Attribution
+from ..participation import Attribution, identity_reliable, min_confidence
 from ..state import (
     ControlChanged,
     ConversationState,
@@ -70,6 +71,7 @@ from .memory import PROMOTABLE_KINDS, MeetingMemory, Scope, WorkingMemory
 from .participation import GateDecision, LiveParticipation, Verdict
 from .playback import PlaybackController
 from .registry import SessionRegistry
+from .turns import TurnRecord
 
 SOFT_DENY = frozenset({"not_addressed", "no_transcript", "low_intent_confidence"})   # may flip as more transcript arrives
 TOOL_RESULT_MAX_CHARS = 12_000
@@ -77,6 +79,9 @@ TOOL_RESULT_MAX_CHARS = 12_000
 
 @dataclass
 class LiveParams:
+    transcript_grace_s: float = 3.0    # extra wait for a lagging input transcript before the gate fails silent
+    error_watch_s: float = 10.0        # after a failed tool, if the model says nothing for this long, ask it to explain
+    tool_continuation_s: float = 20.0  # an answer this soon after a tool result continues the allowed turn
     hold_ms: int = 1500                # max time response audio waits for a participation verdict (placeholder, tune)
     hold_max_chunks: int = 200         # bound on held audio
     uplink_queue: int = 100            # bounded; oldest mic audio is dropped (and counted) if the network lags
@@ -93,6 +98,10 @@ class LiveParams:
     guidance_injection: bool = True    # send style notes mid-session (supported per docs; effect unverified)
     leave_grace_s: float = 6.0         # how long a spoken goodbye may take before leaving anyway
     action_timeout_s: float = 5.0      # platform actions (mute, camera, picture) must answer within this
+
+
+FAILURE_HINT = ("This failed. Tell the participant briefly and plainly what failed (use details.reason when present) "
+                "and what they can do next. Never stay silent and never claim it worked.")
 
 
 class _Gate:
@@ -120,7 +129,9 @@ class LiveVoiceEngine:
                  params: LiveParams | None = None, clock: Callable[[], float] = time.monotonic,
                  participants: ParticipantRegistry | None = None, behaviour: BehaviourController | None = None,
                  expressions: ExpressionEmitter | None = None, identity_image: str = '',
-                 control: ControlState | None = None, memory_gate: MemoryWriteGate | None = None):
+                 control: ControlState | None = None, memory_gate: MemoryWriteGate | None = None,
+                 transcript_observers: tuple[Callable[[str, Attribution], None], ...] = (),
+                 turn_observers: tuple[Callable[[TurnRecord], Awaitable[None] | None], ...] = ()):
         self.session_id, self.scope, self.cfg, self.roles, self.names = session_id, scope, cfg, roles, names
         self.provider, self.session_config, self.adapter = provider, session_config, adapter
         self.participation, self.sessions, self.tools = participation, registry, tools
@@ -139,6 +150,8 @@ class LiveVoiceEngine:
         self.takeover_active = False
         self.control = control or ControlState()
         self.memory_gate = memory_gate
+        self.transcript_observers, self.turn_observers = transcript_observers, turn_observers
+        self.text_sink: Callable[[str, str], None] | None = None     # opt-in local debugging: ("heard"|"said", text)
         self.identity_image = identity_image
         self._ctrl_done = False
         self._ctrl_text = ""            # turn text already checked for a command (duplicate finals must not re-fire)
@@ -168,6 +181,10 @@ class LiveVoiceEngine:
         self._turn_text = ""
         self._turn_end_at: float | None = None
         self._origin_next = "participant"
+        self._gate_outcomes: dict[int, str] = {}      # response id -> allowed | denied (bounded)
+        self._latest_rid: int | None = None            # newest response that produced audio
+        self._continue_from: int | None = None        # the response whose tool call this answer continues
+        self._continue_after_tool_until = 0.0   # the model's answer after an allowed turn's tool call is not a new turn
         self._recover_lock = asyncio.Lock()
         self._seen_events: deque[str] = deque(maxlen=256)
 
@@ -391,6 +408,10 @@ class LiveVoiceEngine:
             self._turn_text = (self._turn_text + " " + ev.text).strip()
             if ev.finished and self.memory_gate is not None:
                 self.memory_gate.observe(self._turn_text)
+            if ev.finished:
+                self._notify_transcript()
+                if self.text_sink is not None:
+                    self.text_sink("heard", ev.text)
             self._behaviour_observe(self._turn_text, final=False)
             await self._handle_control(ev.finished)
             await self._reevaluate_pending()
@@ -402,6 +423,8 @@ class LiveVoiceEngine:
             g = self._gates.get(ev.response_id)
             if g is not None:
                 g.text = (g.text + ev.text)[:2000]
+            if self.text_sink is not None:
+                self.text_sink("said", ev.text)
         elif isinstance(ev, GenerationComplete):
             self.playback.finish(ev.response_id)
         elif isinstance(ev, TurnComplete):
@@ -442,7 +465,12 @@ class LiveVoiceEngine:
         now = self.clock()
         if g is None:
             origin, self._origin_next = self._origin_next, "participant"
+            if (origin == "participant" and self.clock() < self._continue_after_tool_until
+                    and self._gate_outcomes.get(self._continue_from or -1) == "allowed"):
+                origin = "app"                      # continuation of an allowed turn: mute, takeover and silence still apply
+                self._continue_after_tool_until, self._continue_from = 0.0, None
             g = self._gates[rid] = _Gate(rid, origin, now)
+            self._latest_rid = rid
             if self._turn_end_at is not None and now >= self._turn_end_at:
                 self.metrics.observe("live_first_audio_ms", (now - self._turn_end_at) * 1000)
                 self._turn_end_at = None
@@ -511,6 +539,9 @@ class LiveVoiceEngine:
 
     def _finish_gate(self, g: _Gate, state: str, reason: str) -> None:
         g.state, g.reason = state, reason
+        self._gate_outcomes[g.rid] = state
+        for old in sorted(self._gate_outcomes)[:-8]:
+            self._gate_outcomes.pop(old, None)
         if state == "denied":
             g.held.clear()
         if g.timer and g.timer is not asyncio.current_task():
@@ -525,6 +556,12 @@ class LiveVoiceEngine:
             await asyncio.sleep(self.p.hold_ms / 1000)
         except asyncio.CancelledError:
             return
+        if g.state == "pending" and g.origin == "participant":
+            # The input transcript can arrive well after the audio; waiting a little longer beats dropping a real reply.
+            waited = 0.0
+            while waited < self.p.transcript_grace_s and g.state == "pending" and not self._turn_text.strip():
+                await asyncio.sleep(0.1)
+                waited += 0.1
         if g.state == "pending":
             await self._evaluate(g, final=True)
             if g.state == "pending":
@@ -567,6 +604,7 @@ class LiveVoiceEngine:
         att = att or self._attribution()
         who = self.names.get(att.participant_id or "", None)
         self.working.add_turn(who or "participant", text)
+        self._notify_turn(text, att, who)
         self._st(UtteranceAdded(UtteranceRecord(f"t{self.state.version}", att.participant_id, who, att.confidence, text,
                                                 int(self.clock() * 1000), att.overlap)))
 
@@ -909,6 +947,45 @@ class LiveVoiceEngine:
         await self._confirm(f"The latest candidate {rec.kind.replace('_', ' ')} is now confirmed. "
                             "Say briefly that it is confirmed.")
 
+    def _notify_transcript(self) -> None:
+        """Early, synchronous hook for permission-style observers (never raises into the engine)."""
+        if not self.transcript_observers or not self._turn_text.strip():
+            return
+        att = self._attribution()
+        for obs in self.transcript_observers:
+            try:
+                obs(self._turn_text, att)
+            except Exception:  # noqa: BLE001 - an observer bug must not break the conversation
+                self.metrics.inc("observer_errors")
+
+    def _notify_turn(self, text: str, att: Attribution, who: str | None) -> None:
+        """Late hook after a turn is committed; async observers run as tracked background tasks."""
+        if not self.turn_observers:
+            return
+        rec = TurnRecord(text, att.participant_id, who, att.confidence,
+                         identity_reliable(att, min_confidence(self.cfg, self.participation.th)), f"t{self.state.version}")
+        for obs in self.turn_observers:
+            try:
+                res = obs(rec)
+            except Exception:  # noqa: BLE001
+                self.metrics.inc("observer_errors")
+                continue
+            if inspect.isawaitable(res):
+                self._spawn(self._run_observer(res), "turn_observer")
+
+    async def _run_observer(self, awaitable: Awaitable[None]) -> None:
+        try:
+            await awaitable
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            self.metrics.inc("observer_errors")
+
+    def queue_note(self, text: str) -> None:
+        """Send a quiet context note to the model (no reply requested). Safe to call from sync code."""
+        if not self._closing and self._session is not None:
+            self._spawn(self._send_note(text), "note")
+
     async def _send_note(self, text: str) -> None:
         sess = self._session
         if sess is None or self._closing:
@@ -924,6 +1001,22 @@ class LiveVoiceEngine:
             raise ProviderError("no active session")
         self._origin_next = "app"
         await self._session.send_text(text)
+
+    async def _error_watch(self, tool: str, reason: str) -> None:
+        """If a tool failed and the model then says nothing, have it explain. Silence after a failure is a bug."""
+        before = self._latest_rid
+        try:
+            await asyncio.sleep(self.p.error_watch_s)
+            if self._closing or self._latest_rid != before or self.muted or self.takeover_active or self._session is None:
+                return
+            self.metrics.inc("live_error_prompts")
+            await self.prompt(f"The last action ({tool}) failed"
+                              + (f": {reason}" if reason else "")
+                              + ". Tell the participant briefly and plainly what went wrong and what they can do next.")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            self.metrics.inc("live_error_prompt_failed")
 
     # ---- tools -------------------------------------------------------------------------------------------------------
     async def _run_tool(self, req: ToolRequest, gen: int) -> None:
@@ -948,6 +1041,8 @@ class LiveVoiceEngine:
                         if self.memory_gate is not None and self._turn_text.strip():
                             # Input transcription can lag the tool call; use the turn text we have.
                             self.memory_gate.observe(self._turn_text)
+                        if self._turn_text.strip():
+                            self._notify_transcript()
                         if self.tools.allows_live_write(req.name):
                             # The handler re-checks the explicit authorization (notes mode or memory gate);
                             # it writes, so it cannot go through execute_read_only.
@@ -956,14 +1051,18 @@ class LiveVoiceEngine:
                             res = await self.tools.execute_read_only(ToolCall(req.name, req.args), cid)
                     finally:
                         self._st(ToolFinished(cid))
+                reason = res.details.get("reason") if isinstance(res.details, dict) else None
+                self._emit("live.tool", tool=req.name, ok=res.ok, error=res.error or "",
+                           reason=str(reason)[:120] if reason else "")
                 if res.ok:
                     payload = {"result": _jsonable(res.output)}
                 else:
-                    payload = {"error": res.error or "failed"}
+                    payload = {"error": res.error or "failed", "say": FAILURE_HINT}
                     if res.retryable:
                         payload["retryable"] = True
                     if res.details:
                         payload["details"] = _jsonable(res.details)
+                    self._spawn(self._error_watch(req.name, str(res.details.get("reason", "")) if res.details else ""), "error-watch")
                     if res.error == "side_effect_requires_approval" or res.pending_approval:
                         self.approvals_needed.append(req.name)
             if gen != self._session_gen or self._session is not sess or sess is None or self._closing:
@@ -971,10 +1070,19 @@ class LiveVoiceEngine:
                 return
             await sess.send_tool_result(req.call_id, req.name, payload)
             self.metrics.inc("live_tool_calls")
+            self._continue_from = self._latest_rid      # the turn that called the tool
+            self._continue_after_tool_until = self.clock() + self.p.tool_continuation_s
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a tool path failure must never reach the audio paths
             self.metrics.inc("live_tool_errors")
+            self._emit("live.tool", tool=req.name, ok=False, error="internal_error", reason="")
+            try:                                                   # the model must always get an answer, never silence
+                if sess is not None and not self._closing and self._session is sess:
+                    await sess.send_tool_result(req.call_id, req.name, {"error": "internal_error", "say": FAILURE_HINT})
+                    self._spawn(self._error_watch(req.name, ""), "error-watch")
+            except Exception:  # noqa: BLE001
+                self.metrics.inc("live_tool_error_reply_failed")
         finally:
             self._tool_tasks.pop(req.call_id, None)
 

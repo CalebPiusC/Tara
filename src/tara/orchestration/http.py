@@ -79,12 +79,30 @@ class StdlibHttpClient:
                   max_bytes: int = 1_000_000) -> HttpResponse:
         return await asyncio.to_thread(self._get_sync, url, params or {}, headers or {}, timeout_s, max_bytes)
 
+    async def post(self, url: str, *, json_body: Mapping[str, Any] | None = None,
+                   headers: Mapping[str, str] | None = None, timeout_s: float = 8.0,
+                   max_bytes: int = 1_000_000) -> HttpResponse:
+        return await asyncio.to_thread(self._post_sync, url, json_body or {}, headers or {}, timeout_s, max_bytes)
+
     def _get_sync(self, url: str, params: Mapping[str, Any], headers: Mapping[str, str],
                   timeout_s: float, max_bytes: int) -> HttpResponse:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         target = f"{url}{'&' if '?' in url else '?'}{query}" if query else url
         hdrs = {"User-Agent": self.user_agent, "Accept": "application/json", **dict(headers)}
-        req = urllib.request.Request(target, headers=hdrs, method="GET")
+        return self._send_sync(urllib.request.Request(target, headers=hdrs, method="GET"), timeout_s, max_bytes, target)
+
+    def _post_sync(self, url: str, json_body: Mapping[str, Any], headers: Mapping[str, str],
+                   timeout_s: float, max_bytes: int) -> HttpResponse:
+        # POST is only ever issued by a provider to its own fixed endpoint with a bounded
+        # JSON body; it is never driven by model text or user input directly.
+        data = json.dumps(dict(json_body)).encode("utf-8")
+        hdrs = {"User-Agent": self.user_agent, "Accept": "application/json",
+                "Content-Type": "application/json", **dict(headers)}
+        return self._send_sync(urllib.request.Request(url, data=data, headers=hdrs, method="POST"),
+                               timeout_s, max_bytes, url)
+
+    def _send_sync(self, req: urllib.request.Request, timeout_s: float, max_bytes: int,
+                   target: str) -> HttpResponse:
         try:
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 body = resp.read(max_bytes + 1)

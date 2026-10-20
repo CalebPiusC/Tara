@@ -19,8 +19,18 @@ class FakeHttp:
     async def get(self, url: str, *, params: Mapping[str, Any] | None = None,
                   headers: Mapping[str, str] | None = None, timeout_s: float = 8.0,
                   max_bytes: int = 1_000_000) -> HttpResponse:
-        self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {}),
-                           "timeout_s": timeout_s, "max_bytes": max_bytes})
+        self.calls.append({"method": "get", "url": url, "params": dict(params or {}),
+                           "headers": dict(headers or {}), "timeout_s": timeout_s, "max_bytes": max_bytes})
+        return self._respond(url)
+
+    async def post(self, url: str, *, json_body: Mapping[str, Any] | None = None,
+                   headers: Mapping[str, str] | None = None, timeout_s: float = 8.0,
+                   max_bytes: int = 1_000_000) -> HttpResponse:
+        self.calls.append({"method": "post", "url": url, "json": dict(json_body or {}),
+                           "headers": dict(headers or {}), "timeout_s": timeout_s, "max_bytes": max_bytes})
+        return self._respond(url)
+
+    def _respond(self, url: str) -> HttpResponse:
         item = self.responses.get(url)
         if item is None:
             raise ToolError("not_found", "no fake response for " + url)

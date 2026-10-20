@@ -16,3 +16,9 @@ models/
 data/
 .DS_Store
 *.egg-info/
+
+# Tara work data (CVs, candidates, interviews, generated documents)
+work/
+
+# local database backups
+backups/

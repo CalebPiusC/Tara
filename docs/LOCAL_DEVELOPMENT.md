@@ -56,3 +56,6 @@ TARA_TEST_DATABASE_URL=postgresql:///tara_memory \
 ```
 
 No memory text, query or database URL is printed by the demo. Full operations and failure modes: [MEMORY_OPERATIONS](MEMORY_OPERATIONS.md).
+
+## Headphones or speakers (demo)
+`python -m tara.voice.demo` picks automatically (`--output auto`, the default) and prints what it decided. Built-in speakers and anything it cannot identify use half-duplex (mic muted while Tara speaks, so no voice interruption); headphone-like devices keep full voice interruption. Override with `--headphones` or `--speaker`. Detection runs once at start and wired-headphone detection is unverified; see `src/tara/adapters/output_detect.py`.

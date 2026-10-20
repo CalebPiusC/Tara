@@ -179,8 +179,10 @@ def test_recall_and_forget_tools_use_the_bound_scope():
         svc = service()
         item = await svc.remember(scope(), "Testflow pricing starts at ten dollars.", source="s1:1")
         recall = recall_memory_tool(svc, scope())
-        hits = await recall.handler("Testflow pricing")
-        assert hits and hits[0]["id"] == item.id
+        out = await recall.handler("Testflow pricing")
+        assert out["count"] == 1 and out["memories"][0]["id"] == item.id
+        broad = await recall.handler("anything we did last week")
+        assert broad["match"] == "recent" and broad["memories"][0]["id"] == item.id
 
         gate = MemoryWriteGate()
         forget = forget_memory_tool(svc, scope(), gate)
@@ -189,6 +191,8 @@ def test_recall_and_forget_tools_use_the_bound_scope():
         gate.observe("Forget that information.")
         assert await forget.handler(memory_id=item.id) == {"status": "deleted"}
         assert await svc.recall(scope(), "Testflow pricing") == []
+        empty = await recall.handler("do you remember anything")
+        assert empty["count"] == 0 and "Tell the participant" in empty["note"]
     run(go())
 
 
@@ -211,3 +215,13 @@ def test_a_store_failure_is_reported_and_never_marked_as_saved():
 
 def test_rendering_accepts_an_empty_list():
     assert render_memories([]) == ""
+
+
+def test_save_requests_do_not_need_the_exact_phrase():
+    from tara.memory.intent import is_remember_request
+    for ok in ["Remember that the offer decision is due Friday", "Please save that the offer is due Friday",
+               "Make a note that the offer decision is due Friday", "Don't forget our offer decision is due Friday",
+               "Write this down: offer decision Friday"]:
+        assert is_remember_request(ok), ok
+    for no in ["The offer decision is due Friday", "I remember the offer", "Do you remember the offer?"]:
+        assert not is_remember_request(no), no

@@ -3,8 +3,9 @@
 Run:
   TARA_EXTERNAL_TESTS=1 .venv/bin/python -m pytest -m external tests/external -q
 
-Brave is exercised only when TARA_SEARCH_API_KEY is present. Nothing is claimed
-about live Gemini here; that remains the separate live_api tier.
+Brave or Tavily is exercised only when TARA_SEARCH_API_KEY is present and
+TARA_SEARCH_PROVIDER selects it (Brave by default). Nothing is claimed about
+live Gemini here; that remains the separate live_api tier.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import pytest
 from tara.orchestration.fetch import SafeFetcher
 from tara.orchestration.http import StdlibHttpClient
 from tara.orchestration.places import CountriesDevProvider, OpenMeteoGeocoder
-from tara.orchestration.search import BraveSearchProvider
+from tara.orchestration.search import make_search_provider
 from tara.orchestration.weather import OpenMeteoWeather
 
 pytestmark = [
@@ -54,13 +55,15 @@ def test_public_url_fetch_is_bounded_and_readable():
 
 
 @pytest.mark.skipif(not os.getenv("TARA_SEARCH_API_KEY"), reason="TARA_SEARCH_API_KEY not set")
-def test_brave_search_returns_attributable_results():
+def test_configured_search_provider_returns_attributable_results():
     import asyncio
 
+    provider_name = os.getenv("TARA_SEARCH_PROVIDER", "brave").strip().lower()
+
     async def go():
-        provider = BraveSearchProvider(StdlibHttpClient(), os.environ["TARA_SEARCH_API_KEY"])
+        provider = make_search_provider(provider_name, StdlibHttpClient(), os.environ["TARA_SEARCH_API_KEY"])
         result = await provider.search("Python programming language official site", 3)
-        assert result.provider == "brave"
+        assert result.provider == provider_name
         assert all(hit.url.startswith(("http://", "https://")) for hit in result.hits)
         assert all(hit.title for hit in result.hits)
 

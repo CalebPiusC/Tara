@@ -112,6 +112,12 @@ class LiveParticipation:
             if cfg.mode in INTERVIEW_MODES and not identity_reliable(attribution, min_conf):
                 return GateDecision(Verdict.DENY, "speaker_identity_low")
             return GateDecision(Verdict.ALLOW, "directed")
+        if (cfg.lead_interview and cfg.mode in INTERVIEW_MODES
+                and self.roles.get(attribution.participant_id or "") is Role.CANDIDATE):
+            # Tara is running this interview: the candidate does not need to say her name to be answered.
+            if not identity_reliable(attribution, min_conf):
+                return GateDecision(Verdict.DENY, "speaker_identity_low")
+            return GateDecision(Verdict.ALLOW, "candidate_turn")
         if cfg.policy is SpeakingPolicy.PROACTIVE_ALLOWED and cfg.mode not in INTERVIEW_MODES:
             return GateDecision(Verdict.ALLOW, "proactive")
         return GateDecision(Verdict.DENY, "not_addressed")

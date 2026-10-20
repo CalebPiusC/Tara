@@ -38,9 +38,11 @@ class WorkingMemory:
     summary: str = ""
     turns: deque[tuple[str, str]] = field(default_factory=deque)   # (speaker, text)
     pending_questions: list[str] = field(default_factory=list)
+    total_turns: int = 0                                          # ever added; lets a recorder know what is new
 
     def add_turn(self, speaker: str, text: str) -> None:
         self.turns.append((speaker, text))
+        self.total_turns += 1
         while len(self.turns) > self.max_turns:
             self.turns.popleft()
 

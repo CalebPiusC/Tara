@@ -18,7 +18,7 @@ from .fetch import SafeFetcher, fetch_tool_defs
 from .http import StdlibHttpClient
 from .places import CountriesDevProvider, OpenMeteoGeocoder, place_tool_defs
 from .research import ResearchService, ResearchTaskManager, research_tool_defs
-from .search import BraveSearchProvider, search_tool_defs
+from .search import make_search_provider, search_tool_defs
 from .time import time_tool_defs
 from .weather import OpenMeteoWeather, weather_tool_defs
 
@@ -68,8 +68,8 @@ class Orchestration:
             if self.geocoder is not None:
                 self._defs.extend(weather_tool_defs(self.geocoder, self.weather))
         if self.search is None and s.search and s.search_api_key:
-            self.search = BraveSearchProvider(self.http, s.search_api_key, timeout_s=s.http_timeout_s,
-                                              cache_ttl_s=s.search_cache_s)
+            self.search = make_search_provider(s.search_provider, self.http, s.search_api_key,
+                                               timeout_s=s.http_timeout_s, cache_ttl_s=s.search_cache_s)
         if self.search is not None:
             self._defs.extend(search_tool_defs(self.search))
         if s.fetch and self.fetcher is None:

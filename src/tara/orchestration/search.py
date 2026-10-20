@@ -1,9 +1,15 @@
 """Web search behind a provider interface.
 
-Brave Search is the selected provider: an independent index with source URLs and
-snippets, a prepaid $5/1,000-request plan with $5 monthly credit (about 1,000
-requests), and a 50 requests/second ceiling (checked 2026-10-20).  It needs a
-subscription token, so the tool is registered only when the operator configures
+Two providers are implemented, selected by `TARA_SEARCH_PROVIDER`:
+
+- **Brave** (default): independent index with source URLs and snippets, a prepaid
+  $5/1,000-request plan with $5 monthly credit (about 1,000 requests) and a
+  50 requests/second ceiling (checked 2026-10-20).  It needs a subscription token.
+- **Tavily**: 1,000 free API credits/month with no credit card required (checked
+  2026-10-20); a basic search costs 1 credit.  It returns source URLs and short
+  content snippets tuned for LLM context.
+
+Both need a key, so `web_search` is registered only when the operator configures
 one.  The provider can be swapped without changing the orchestrator.
 """
 from __future__ import annotations
@@ -79,6 +85,77 @@ class BraveSearchProvider:
                                 altered_query=clean_text(str(query_info.get("altered", "")), 400))
         self.cache.set(key, result, self.cache_ttl_s)
         return result
+
+
+class TavilySearchProvider:
+    """Tavily Search API (`POST /search`). Free tier: 1,000 credits/month, no card."""
+
+    def __init__(self, http: HttpClient, api_key: str, *, base_url: str = "https://api.tavily.com",
+                 timeout_s: float = 8.0, cache_ttl_s: float = 60.0):
+        self.http, self._key, self.base_url = http, api_key, base_url.rstrip("/")
+        self.timeout_s, self.cache_ttl_s = timeout_s, cache_ttl_s
+        self.cache = TTLCache(max_entries=128)
+
+    async def search(self, query: str, limit: int = 5) -> SearchResponse:
+        if not self._key:
+            raise ToolError("search_not_configured", "Web search is not configured")
+        text = clean_text(query, 400)
+        if not text:
+            raise ToolError("bad_query", "A search query is required")
+        limit = max(1, min(int(limit), 10))
+        key = f"{text.lower()}|{limit}"
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        # `include_answer=False` keeps this a pure retrieval tool: no provider-side
+        # model call, no synthesized answer, so Tara still reasons over sources.
+        body = {"query": text, "search_depth": "basic", "max_results": limit, "topic": "general",
+                "include_answer": False, "include_raw_content": False, "include_published_date": True}
+        response = await self.http.post(f"{self.base_url}/search", json_body=body,
+                                        headers={"Accept": "application/json",
+                                                 "Authorization": f"Bearer {self._key}"},
+                                        timeout_s=self.timeout_s, max_bytes=500_000)
+        if response.status in (401, 403):
+            raise ToolError("search_auth", "Web search credentials were rejected", retryable=False)
+        if response.status == 429:
+            retry_after = response.headers.get("retry-after", "")
+            raise ToolError("search_rate_limited", "Web search is rate-limited", retryable=True,
+                            details={"retry_after_s": retry_after} if retry_after else {})
+        if response.status in (432, 433):
+            raise ToolError("search_quota", "The web search plan limit was reached", retryable=False)
+        if response.status >= 500:
+            raise ToolError("search_unavailable", "The web search service is unavailable", retryable=True)
+        if response.status != 200:
+            raise ToolError("search_failed", "The web search request failed", retryable=False)
+        data = parse_json(response.body)
+        if not isinstance(data, dict):
+            raise ToolError("bad_response", "The search provider returned an unexpected response", retryable=True)
+        raw_results = data.get("results")
+        hits: list[SearchHit] = []
+        seen_urls: set[str] = set()
+        for item in raw_results if isinstance(raw_results, list) else []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "")
+            title = clean_text(str(item.get("title") or ""), 200)
+            if not title or not _public_http_url(url) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            hits.append(SearchHit(
+                title=title, url=url, snippet=clean_text(str(item.get("content") or ""), 600),
+                page_age=clean_text(str(item.get("published_date") or ""), 80),
+            ))
+        result = SearchResponse(query=text, hits=tuple(hits), provider="tavily")
+        self.cache.set(key, result, self.cache_ttl_s)
+        return result
+
+
+def make_search_provider(provider: str, http: HttpClient, api_key: str, *,
+                         timeout_s: float = 8.0, cache_ttl_s: float = 60.0) -> SearchProvider:
+    """Select the configured provider. Unknown names fall back to Brave (validation rejects them first)."""
+    if (provider or "").strip().lower() == "tavily":
+        return TavilySearchProvider(http, api_key, timeout_s=timeout_s, cache_ttl_s=cache_ttl_s)
+    return BraveSearchProvider(http, api_key, timeout_s=timeout_s, cache_ttl_s=cache_ttl_s)
 
 
 def _public_http_url(url: str) -> bool:

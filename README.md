@@ -2,57 +2,124 @@
 
 ### An AI team member that knows when to talk, and when not to.
 
-Tara joins your meeting, works out why it exists, tracks who is speaking, and takes part only as far as the organizer's rules and the live state of the conversation allow. It can run an interview, sit in on an engineering meeting, pitch a product from approved docs, or just listen and write the notes.
+## What is Tara?
 
-> **Honest status:** Tara's voice engine is **Gemini Live**, integrated behind our own interfaces and tested with scripted fakes and the real SDK's types (**see the newest changelog entry for the current offline count**). One real one-turn smoke test now passes against the hosted service: **1.77 s connect, 1.04 s to first audio, 24 kHz output**. The owner has run a real microphone/headphone conversation; persistent memory v1 is implemented and tested against real PostgreSQL; read-only orchestration tools (time, location, weather, public pages, bounded research) are implemented, with Open-Meteo and countries.dev checked live and Brave search untested (no key). The full live behaviour suite, real Gemini tool calls, real interruption/reconnect, and Google Meet are **not** tested. **No local model is downloaded or used.** See [what works today](#-what-works-today), [GEMINI_LIVE](docs/GEMINI_LIVE.md) and [ORCHESTRATION](docs/ORCHESTRATION.md).
+Tara is an AI participant for live meetings. She joins a conversation by voice, works out why she is there, tracks who is speaking, and takes part only as far as the organizer's rules and the live state of the conversation allow. She can interview a candidate, sit in on a team meeting and take the minutes, present a product from approved material, or simply listen and remember.
+
+Most meeting bots transcribe. Tara takes part. The difference is judgement: a model that speaks whenever it has something to say is worse than silence in a hiring interview or a customer call. So Tara is built on one rule: **deterministic code owns the floor, permissions, identity and tools, and the language model only proposes.**
 
 ---
 
-## 💡 The problem
-Meeting bots transcribe. They do not interview, they do not represent a product, and they do not know when to stay quiet. A model that speaks whenever it has something to say is worse than silence in a hiring interview or a customer call, and a model that mixes up two candidates can quietly corrupt a hiring decision.
+## Features
 
-## 🧠 The idea
-One engine, configured per meeting. **Deterministic code owns the floor, permissions, identity and tools. The language model only proposes.**
+### Conversation
+- **Natural voice** with Gemini Live: speech in, speech out, low latency.
+- **Knows when to speak.** Being addressed, being invited, being told to be quiet, being interrupted and being taken over are separate states, not one flag.
+- **Interruption handling.** Speech from a human cancels Tara mid-sentence, and history keeps only what was actually heard.
+- **Human takeover.** "Thanks Tara, I'll take it from here" closes her speech path at once.
+- **Identity as evidence.** A speaker can be `unknown`. Candidate A's answer never becomes Candidate B's.
+- **A personality, not a script.** Profiles (`professional`, `conversational`, `expressive`) shape tone and length. They never decide whether she speaks.
 
-| Principle | What it means in practice |
-|---|---|
-| 🧭 Context becomes validated config | Organizer prose is input. Permissions come from app policy, so "you may email candidates" creates nothing. |
-| 🗣️ Participation is a state machine | Listening, being addressed, being invited, being told to be quiet, being interrupted and being taken over are separate states. |
-| 🪪 Identity is evidence, not a guess | A speaker can be `unknown`. Candidate A's answer can never silently become Candidate B's. |
-| ⏱️ Stale answers die | Every proposal carries an epoch. If the room moved on, the answer is dropped. |
-| 📚 Grounded pitching | Product claims must cite approved passages, or Tara says she does not know. |
-| 🛑 Human takeover is first class | "Thanks Tara, I'll take it from here" closes the speech path immediately. |
+### Memory
+- **Keeps the meeting without being asked.** Tara stores the conversation in PostgreSQL as it happens (transcript chunks, a summary and key facts), so nobody has to say "remember this". Saying it still works and marks something as confirmed.
+- **Sections and numbered meetings.** A section is like a chat. Every run of the same section is its next numbered meeting (meeting 1, meeting 2, ...), stored with its date and time. Ask "what did we talk about last meeting?", "what was meeting two?" or "which meetings have we had?". A different section name starts a separate memory, so sections never mix.
+- **Editable.** Say "delete the last meeting" and Tara removes it, asking "are you sure?" first when it held something important. Say "that's wrong, it's Monday" and she updates the memory, keeping the old version as history.
+- **Careful by design.** Extracted facts need a word-for-word quote from the transcript and are labelled unconfirmed. Passwords, health and money details are never stored. Old chunks are deleted after a retention period you control.
+- **Carries over.** The next session of a meeting starts with its summary and key facts, and Tara looks things up when asked and says plainly when nothing is recorded.
 
-## 🏗️ Architecture
-What exists today. The only meeting transport is a scripted local adapter; Google Meet is not implemented.
+### Running a meeting
+- **Open items that carry over.** Action items (owner and deadline) and parked topics stay open from meeting to meeting. Ask "what's still open?" or say "the budget one is done".
+- **Opening brief.** When a continuing section starts, Tara speaks first: where things were left and what is still open.
+- **Agenda and time-keeping.** Set an agenda and a length; Tara tracks what is covered and gives quiet nudges ("five minutes left").
+- **Recap and catch-up.** "Recap so far" and "what did I miss", plus a parking lot for off-topic points.
+- **Names and jargon.** A word list (file, env, or by voice) so names are written correctly.
+- **Meeting types.** Stand-up, one-to-one, retro, client call and brainstorm each change how Tara behaves and what the minutes look like (`./dev.sh --type standup`).
+
+### Secretary
+- **Takes minutes** while the meeting runs: decisions, actions with owners, open questions.
+- **Reminds the room** ("we said this earlier") when a confirmed item comes up again.
+- **Recaps on demand.**
+
+### Interviews
+- **Give her a CV, a GitHub account or a portfolio link.** She reads them and builds interview questions from the role and the candidate's skills.
+- **Runs the interview**, then grades each criterion with a verbatim quote from the candidate as evidence.
+- **Returns a report** that always asks for human review. She never says hire or reject.
+- **Create one from the terminal:** `./dev.sh interview new "Name"`, then `./dev.sh interview run <code>` ([INTERVIEWS](docs/INTERVIEWS.md)).
+
+### Documents
+- **PDF, DOCX and Markdown** from an interview, a meeting, or anything you ask for.
+- Gemini Flash writes the readable text from stored facts only. Python renders the file with your fonts and formatting.
+
+### Tools
+Time zones, calculator, location, weather, public web pages, optional web search (Brave or Tavily), and bounded background research.
+
+### Safety
+If something fails Tara says so out loud and the screen shows a problem line. AI-presence disclosure before a meeting, tool use granted per meeting, no raw audio stored by default, secrets never logged, and CV, web and transcript text treated as untrusted data.
+
+---
+
+## Architecture
+
+Deterministic code sits between the model and the meeting. Gemini Live understands, answers and speaks. Our code decides who may be heard, when playback stops, which tools run and what is remembered.
 
 ```mermaid
-flowchart LR
-  MEET["Meeting platform (Google Meet: not implemented)"] <--> MA["MeetingAdapter (scripted local adapter only)"]
-  subgraph Local["Tara process"]
-    MA -->|"mic audio"| UP["Bounded uplink"]
-    MA --> VAD["Local VAD (barge-in, timing)"]
-    UP --> PROV["Voice provider interface"]
-    PROV --> BEH["Behaviour controller (style only)"]
-    BEH -.->|"style notes"| PROV
-    BEH -.->|"expression events"| AVT["Avatar sink (none yet)"]
-    PROV --> GATE["Participation gate (deterministic)"]
-    GATE -->|"allowed audio only"| PB["Playback controller (cancellable)"]
-    PB --> MA
-    VAD -.->|"stop on speech"| PB
-    PROV --> TOOLS["Tool executor (granted, validated)"]
-    WM["Working memory"] -.->|"re-seed after reconnect"| PROV
-    KNOW["Knowledge retrieval (interface)"] -.-> TOOLS
-    MET["Metrics + events (no content)"]
+flowchart TB
+  MEET["Meeting platform: local mic and speakers today, Google Meet planned"] <--> MA["MeetingAdapter"]
+  MA --> UP
+
+  subgraph Voice["Voice path"]
+    direction LR
+    UP["Bounded uplink"] --> PROV["Voice provider interface"]
+    PROV --> GATE["Participation gate"]
+    GATE -->|"allowed audio only"| PB["Playback (cancellable)"]
   end
+  PB --> MA
   PROV <-->|"WSS"| GEM["Gemini Live (cloud)"]
+
+  subgraph Guard["Control and safety"]
+    direction LR
+    CTRL["Spoken controls and permissions"]
+    BEH["Behaviour (style only)"]
+    CLOCK["Agenda clock and opening brief"]
+    WATCH["Error watchdog"]
+  end
+  Guard -.->|"shapes, nudges, explains failures"| Voice
+
+  subgraph Do["What Tara can do"]
+    direction LR
+    TOOLS["Tool executor (granted, checked in code)"]
+    MT["Memory tools"]
+    MEETT["Meeting tools"]
+    DOCT["Documents and interviews"]
+    RO["Lookups"]
+    REC["Recorder"]
+    TOOLS --> MT
+    TOOLS --> MEETT
+    TOOLS --> DOCT
+    TOOLS --> RO
+  end
+  PROV --> TOOLS
+  PROV -.->|"finished turns"| REC
+
+  subgraph Keep["Storage and text models"]
+    direction LR
+    MS["Memory service (scoped to the section)"] --> PG[("PostgreSQL")]
+    FILES[("work folder")]
+    FLASH["Gemini Flash"]
+  end
+  MT --> MS
+  MEETT --> MS
+  REC --> MS
+  REC -->|"summaries"| FLASH
+  DOCT -->|"document text"| FLASH
+  DOCT --> FILES
 ```
-Gemini Live understands, answers and speaks; **our code decides who may be heard, when playback stops, which tools run and what is remembered.** Gemini is cloud, so Tara is **not offline** and audio and transcripts leave the machine. Details: [GEMINI_LIVE](docs/GEMINI_LIVE.md).
 
-## 🎭 Conversational behaviour
-Tara is meant to sound like a thoughtful colleague, not a call-centre script. A small behaviour layer (profiles `professional` by default, `conversational`, `expressive`) reads the room with cheap lexical cues (joke, bad news, correction, urgency, confusion), keeps humour out of serious or sensitive moments and interviews, rate-limits laughter-type reactions, adapts answer length after interruptions or rambling, sends short style notes to the live model, flags stock phrases and human-experience claims in its own words, and emits validated expression events for a future avatar. **It cannot decide whether Tara may speak; the participation gate still does, and mute, takeover and interruption always win.** What is verified: the logic (tests). What is not: how it sounds, because the one-turn smoke audio was not evaluated and no behaviour scenario has been run. The docs say what Gemini Live does and does not support for expression: [CONVERSATIONAL_BEHAVIOUR](docs/CONVERSATIONAL_BEHAVIOUR.md).
+Memory tools are remember, recall, update, forget and delete meeting. Meeting tools are open items, agenda, recap, meeting type and vocabulary. Lookups are time, weather, public pages and search. Working memory (the last turns) is re-seeded to the model after a reconnect, and metrics carry no content. Details of each layer are in [SYSTEM_ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md).
 
-## 🔄 One interaction
+Tara is cloud-backed: audio and transcripts go to Google. Details: [GEMINI_LIVE](docs/GEMINI_LIVE.md), [SYSTEM_ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md).
+
+### One interaction
 ```mermaid
 sequenceDiagram
   participant P as Participant
@@ -71,8 +138,7 @@ sequenceDiagram
   G-->>E: turn complete
 ```
 
-## ✋ Interruption and takeover
-Modeled on how production live-voice systems behave: speech onset cancels the response, and history keeps only what was actually heard. Reference notes: [LIVE_VOICE_REFERENCE](docs/research/LIVE_VOICE_REFERENCE.md).
+### Interruption and takeover
 ```mermaid
 sequenceDiagram
   participant H as Human
@@ -87,88 +153,192 @@ sequenceDiagram
   R->>R: takeover_active = true (speech path closed)
 ```
 
-## 🧩 Memory and knowledge (v1 built; document RAG not built)
-Live conversation state stays in process and is never replaced by search. v1 adds durable long-term memory in PostgreSQL: explicit `remember_memory`, `recall_memory` and `forget_memory` tools, a bounded startup memory block, full-text retrieval, required provenance and tenant/user isolation. It does **not** include embeddings/pgvector, document ingestion, automatic consolidation, Redis or persisted meeting notes; real Gemini tool calling is still unverified. Design: [MEMORY_AND_RAG](docs/MEMORY_AND_RAG.md), [operations](docs/MEMORY_OPERATIONS.md), [context assembly](docs/CONTEXT_ASSEMBLY.md), [security](docs/MEMORY_AND_RETRIEVAL_SECURITY.md). The older keyword-overlap stand-in in [knowledge.py](src/tara/knowledge.py) is still separate.
+### Sections and numbered meetings
+A section is a chat. Every run of the same section is its next numbered meeting. Memory never crosses sections.
+```mermaid
+erDiagram
+  SECTION ||--o{ MEETING : "has numbered"
+  MEETING ||--o{ RECORD : "produces"
+  SECTION ||--o{ RECORD : "scopes"
+  SECTION {
+    string name "for example join or hiring"
+  }
+  MEETING {
+    int number "1, 2, 3 and never reused"
+    time started "stored in UTC, spoken in local time"
+    time ended "empty if the exit was cut short"
+  }
+  RECORD {
+    string kind "episode, summary, fact, decision, action, note"
+    string status "confirmed or candidate"
+    string source "provenance is required"
+    time expires "retention, empty for kept items"
+  }
+```
 
-## ✅ What works today
-Most of this is verified offline against fakes and the SDK's real data types. **One real one-turn Gemini Live smoke test has run; the owner has also run a headphone conversation with the local demo, but nothing has used Google Meet, and live behaviour, interruption and reconnect remain unverified.**
+### The life of a meeting
+```mermaid
+sequenceDiagram
+  participant U as You
+  participant T as Tara
+  participant R as Recorder
+  participant D as PostgreSQL
+  participant F as Gemini Flash
+  U->>T: start section "join"
+  T->>D: start meeting N, load earlier meetings and open items
+  T->>U: opening brief: where things were left, what is open
+  loop during the meeting
+    U->>T: speak
+    T->>U: reply, run tools, nudge on time
+    T->>R: finished turns
+    R->>D: transcript chunk every few turns
+  end
+  U->>T: stop
+  T->>D: mark meeting N ended
+  R->>D: save the last chunk
+  R->>F: transcript, ask for summary and facts
+  F-->>R: summary and facts with exact quotes
+  R->>D: keep the summary, and only facts whose quote is real
+  Note over R,D: if this step fails, the next start catches up
+```
 
-| Area | Where | What it does |
-|---|---|---|
-| Gemini Live adapter | [voice/gemini_live.py](src/tara/voice/gemini_live.py) | Connects through the official SDK, maps provider messages to our neutral events, builds the session config, classifies errors, redacts the key |
-| Voice interfaces | [voice/events.py](src/tara/voice/events.py) | Provider-neutral session contract; no Google type leaves the adapter |
-| Live engine | [voice/engine.py](src/tara/voice/engine.py) | Uplink with backpressure, interruption (provider event and local barge-in), stale-audio rejection, gating, tools, reconnect and resumption, limits |
-| Playback | [voice/playback.py](src/tara/voice/playback.py) | Bounded per-response queues, immediate cancel, stale chunk rejection |
-| Local audio demo | [adapters/audio_device.py](src/tara/adapters/audio_device.py), [voice/demo.py](src/tara/voice/demo.py) | Default microphone at 16 kHz; output resampled to the device rate; same gate, no Meet; fake-backend tests plus an owner headphone run; `--speaker` half-duplex avoids echo feedback |
-| Participation gate | [voice/participation.py](src/tara/voice/participation.py) | Addressed or not, silent policy, mute, takeover by a trusted role, identity in interviews |
-| Conversational behaviour | [behaviour/](src/tara/behaviour/) | Profiles, room-reading signals, humour and verbosity rules, style notes, output quality checks, avatar-ready expression events, floor etiquette (waits while someone is mid-sentence) |
-| Memory interfaces | [voice/memory.py](src/tara/voice/memory.py), [memory/](src/tara/memory/) | Working memory, scoped meeting memory with provenance, persistent explicit long-term memory in PostgreSQL, bounded retrieval |
-| Tools | [tools.py](src/tara/tools.py) | Granted, typed, time-limited, audited; side effects need approval |
-| Orchestration tools | [orchestration/](src/tara/orchestration/) | Read-only time/calculator, Open-Meteo location/weather, public-page fetch, opt-in Brave search, bounded research and in-process tasks; no side effects ([ORCHESTRATION](docs/ORCHESTRATION.md)) |
-| Settings and metrics | [settings.py](src/tara/settings.py), [metrics.py](src/tara/metrics.py) | Validated environment config; latency and failure counters |
-| Deterministic core | [config.py](src/tara/config.py), [runtime.py](src/tara/runtime.py), [participation.py](src/tara/participation.py), others | Meeting config validation, floor state machine, identity, evidence, reports |
-| Optional local path (dormant) | [engine.py](src/tara/engine.py), [providers/](src/tara/providers/) | The earlier cascaded STT, router, LLM, TTS runtime; kept and tested with fakes, not started, **no models downloaded** |
+### How memory is organized
+```mermaid
+flowchart TD
+  SAY["What is said"] --> WM["Working memory: last turns, this session only"]
+  SAY --> CH["Transcript chunks: stored word for word with a retention date"]
+  SAY -->|"you ask: remember, update, forget"| EX["Explicit memory: confirmed, can be edited, history kept"]
+  SAY -->|"you ask: action item, park it, done"| OI["Open items: carry over until completed"]
+  CH --> SUM["Summary and key facts (checked against a real quote)"]
+  SUM --> CAND["Unconfirmed facts: promoted when seen again"]
+  EX --> STORE[("Stored per section")]
+  OI --> STORE
+  SUM --> STORE
+  CAND --> STORE
+  STORE --> RECALL["Recall tools: recall, meeting lookup, list meetings, open items"]
+  STORE --> BRIEF["Opening brief and startup context for the next meeting"]
+  STORE --> DOCS["Minutes and reports"]
+  STORE -.->|"expired or deleted"| GONE["Purged or hidden"]
+```
 
-## 🚧 What does not work yet
-- Only one real text-in/audio-out Gemini Live smoke turn has run: audio input, playback audibility, event ordering under interruption, tool behavior and speech-to-speech latency are unverified ([smoke test](#-run-it)).
-- The local audio-device demo has run on headphones; speaker mode is half-duplex because there is no echo cancellation, and there is **no Google Meet connection**. The official Meet Media API is Developer Preview and closed to new signups; the plan is a browser participant or a third-party bot API ([GOOGLE_MEET_RESEARCH](docs/GOOGLE_MEET_RESEARCH.md)).
-- Speaker identity is unknown on mixed audio.
-- Memory v1 stores explicit long-term memories in PostgreSQL, but there is **no document RAG, vector search, automatic extraction or Redis**, and meeting notes are still in-memory. Real Gemini tool calling for save/recall/forget is unverified.
-- No vocal expression is verified (laughter, tone, pacing): the smoke call produced audio but nobody evaluated it, and no behaviour scenario has been run. The Live docs do not document controls for them.
-- Only one text-turn latency sample exists (connect and first audio above); there is no speech-to-speech, playback or interruption latency measurement.
-- No avatar.
+### Where things live
+| Area | Code |
+|---|---|
+| Gemini Live adapter and voice contracts | [voice/](src/tara/voice/) |
+| Participation gate, floor, identity | [participation.py](src/tara/participation.py), [voice/participation.py](src/tara/voice/participation.py) |
+| Behaviour (style only) | [behaviour/](src/tara/behaviour/) |
+| Memory | [memory/](src/tara/memory/), [secretary/](src/tara/secretary/) |
+| Meeting features (open items, agenda, vocabulary, types, brief) | [meetings/](src/tara/meetings/) |
+| Interviews | [hiring/](src/tara/hiring/) |
+| Documents | [docgen/](src/tara/docgen/) |
+| Tools | [tools.py](src/tara/tools.py), [orchestration/](src/tara/orchestration/), [workflows.py](src/tara/workflows.py) |
 
-## 🛠️ Stack
-Python 3.13 (3.11+ required) · `google-genai` SDK for Gemini Live (optional extra, an API client not a model) · `sounddevice` for the local mic/speaker demo (optional extra) · `psycopg` for persistent memory (optional extra) · stdlib for the rest of the core · FastAPI and a control API are planned, not built. **No local ML models are installed.**
+---
 
-## ▶️ Run it
+## How to run it
+
+You need Python 3.11+ and a Gemini API key from [Google AI Studio](https://aistudio.google.com/).
+
+**1. Install**
 ```bash
 python3.13 -m venv .venv
-.venv/bin/pip install -e ".[dev,live,audio,memory]"
-.venv/bin/python -m pytest -q            # offline suite: no network or key; see CHANGELOG.md for the current count
-.venv/bin/ruff check src tests && .venv/bin/mypy src
+.venv/bin/pip install -e ".[dev,live,audio,memory,work]"
 ```
-Real-service smoke test (opt-in; makes one real API call; prints measurements only, never the key or transcripts):
-```bash
-export GEMINI_API_KEY=...                 # from Google AI Studio, never committed
-export TARA_LIVE_MODEL=...                # a Live model id from the models page
-.venv/bin/python -m tara.voice.smoke
-TARA_LIVE_TEST=1 .venv/bin/python -m pytest -m live_api tests/live -q
-```
-Latest real result (2026-10-20, one text turn): `connect_ms` 1771.9, `first_audio_ms` 1039.4, `audio_bytes` 80160, `sample_rate` 24000, `turn_complete` true, 11 events. This is text-to-first-audio, not speech-to-speech, and playback was not listened to.
 
-Local voice demo (microphone in, Tara's voice out; **headphones are best** so her reply is not fed back into the mic):
-```bash
-set -a; source .env; set +a              # or export the two variables above
-.venv/bin/python -m tara.voice.demo --one-on-one          # headphones: full duplex
-.venv/bin/python -m tara.voice.demo --one-on-one --speaker  # speakers: mic is muted while Tara speaks
+**2. Configure.** Copy [.env.example](.env.example) to `.env` (git-ignored) and fill in the keys (every other option has a default; the full list is [env.full.example](env.full.example)):
 ```
-`--one-on-one` replies to any speech from the single participant, which is what you want for a solo voice demo. Without it, the normal meeting rule applies and you must say “Tara, …”. `--speaker` prevents the speaker echo from being sent back; it disables voice barge-in, so press `Ctrl+C` to stop. The demo replies in English and uses the default input and output devices, not Google Meet. The adapter and CLI are covered by fake-backend tests; the owner has run the headphone conversation on real hardware, and the speaker mode is the supported workaround for feedback. Add `--debug` to print non-content counters (input transcripts, gate outcomes, playback failures) when a run does not reply.
-Config template: [.env.example](.env.example) (placeholders only). More: [LOCAL_DEVELOPMENT](docs/LOCAL_DEVELOPMENT.md).
+GEMINI_API_KEY=<your key>
+TARA_LIVE_MODEL=<a Gemini Live model id from ai.google.dev/gemini-api/docs/models>
+TARA_LLM_MODEL=<a Gemini Flash text model id, for documents and minutes>
+TARA_WORK_ENABLED=1                 # secretary, interviews, documents
+TARA_MEMORY_ENABLED=1               # remember across meetings
+TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory
+```
+`TARA_GITHUB_TOKEN` is optional and raises the GitHub rate limit.
 
-Persistent memory (optional; PostgreSQL):
+**3. Set up memory (PostgreSQL)**
 ```bash
 createdb tara_memory
-.venv/bin/python -m pip install -e '.[memory]'
-TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory .venv/bin/python -m tara.memory.migrate
-TARA_MEMORY_ENABLED=1 TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory \
-  .venv/bin/python -m tara.voice.demo --one-on-one --debug
+.venv/bin/python -m tara.memory.migrate
 ```
-Say “Remember this …” to save, “What did I tell you about …?” to recall, and “Forget that …” to delete. The model must call the tools; only fake-backend tool tests have run so far. See [MEMORY_OPERATIONS](docs/MEMORY_OPERATIONS.md).
 
-## 🔐 Security and privacy
-AI-presence disclosure is required before a meeting starts. Raw audio is not stored by default. The Gemini key lives only on the server, is read from the environment, and is redacted from every error; audio and transcripts do go to Google, and the pricing page says free-tier data may be used to improve Google products, so use a paid tier for real interviews. Interview reports are decision support and always say human review is required. More: [SECURITY_AND_PRIVACY](docs/SECURITY_AND_PRIVACY.md).
+**4. Talk to Tara.** Headphones give the best result. Give the section a name to keep its memory separate.
+```bash
+set -a; source .env; set +a
+.venv/bin/python -m tara.voice.demo --one-on-one              # headphones
+.venv/bin/python -m tara.voice.demo --one-on-one --speaker    # speakers (mic muted while she talks)
+```
+```bash
+./dev.sh --section join      # the next numbered meeting of section 'join'; a new name starts a fresh section
+./dev.sh --list                # sections and their meetings with dates
+```
+Without `--one-on-one`, say "Tara, ..." to get her attention.
 
-## 🗺️ Roadmap
-A real one-turn smoke test is done, and the local audio-device demo is implemented and fake-backend tested. Memory v1 (explicit PostgreSQL memory, cross-session recall, bounded startup context) is implemented and real-Postgres tested; the next memory step is a real Gemini tool-calling check, then automatic consolidation and document RAG. After that: Google Meet transport spike, interviews, pitch and speaker attribution. The old plan to download local models is cancelled. Detail: [IMPLEMENTATION_ROADMAP](docs/IMPLEMENTATION_ROADMAP.md).
+**5. Run an interview (optional).** Create one from the terminal: drop a GitHub link and a CV, say how many questions and how hard, and get a code.
+```bash
+./dev.sh interview new "Feremi"       # asks for the role, GitHub, portfolio and CV (drag the file in)
+./dev.sh interview run feremi         # Tara greets, confirms the name and runs the questions
+./dev.sh interview list               # prepared interviews and results
+```
+Reports are written to `work/documents`. See [INTERVIEWS](docs/INTERVIEWS.md).
 
-## 📖 Documentation
-Start at [docs/README.md](docs/README.md). Project history and handover notes: [CHANGELOG.md](CHANGELOG.md). Open questions: [OPEN_QUESTIONS](docs/research/OPEN_QUESTIONS.md). Sources with access dates: [SOURCES](docs/research/SOURCES.md). Product intent: [initial.md](initial.md).
+**6. Run the tests**
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/ruff check src tests && .venv/bin/mypy src
+```
 
-## 🤝 Contributing
-Read [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) first. Update the docs whenever behavior changes.
+More: [LOCAL_DEVELOPMENT](docs/LOCAL_DEVELOPMENT.md), [CONFIGURATION](docs/CONFIGURATION.md), [WORKFLOWS](docs/WORKFLOWS.md).
 
-## 📄 License
+---
+
+## Sample
+
+An illustrative one-on-one session.
+
+```text
+You:   Tara, we're hiring a backend engineer. Prepare Alex from the inbox, GitHub alexkim.
+Tara:  On it. I'll tell you when the interview plan is ready.
+Tara:  Alex's plan is ready: six questions on Go, PostgreSQL and API design.
+You:   Start the interview.
+Tara:  Alex, thanks for joining. First question: how would you stop a payment
+       from being charged twice if the client retries?
+Alex:  I'd use an idempotency key with a unique constraint, inside a transaction.
+Tara:  Good. What happens if two requests with the same key arrive together?
+...
+You:   Finish the interview and make a PDF report.
+Tara:  Done. The report is in work/documents. It includes scores with Alex's own
+       words as evidence, and it needs a human decision.
+You:   Remember we agreed to send the offer decision by Friday.
+Tara:  Saved.
+```
+
+Next meeting:
+```text
+You:   What did we decide last time?
+Tara:  You agreed to send the offer decision by Friday.
+```
+
+---
+
+## What is next
+Google Meet connection, real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
+
+---
+
+## Contributors
+
+Contributions are welcome.
+
+1. Read [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) for the rules.
+2. Product intent is in [initial.md](initial.md), project history in [CHANGELOG.md](CHANGELOG.md), and all docs are indexed at [docs/README.md](docs/README.md).
+3. Make your change on a branch, run `pytest`, `ruff check src tests` and `mypy src`, and update the docs and changelog when behaviour changes.
+4. Never commit keys, `.env` files, candidate data or the `work/` folder.
+
+**Pull requests are open.** Small, focused PRs with tests are easiest to review.
+
+## License
+
 None chosen yet.
 
 *A good meeting participant is mostly someone who knows when not to speak.*

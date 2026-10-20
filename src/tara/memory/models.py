@@ -12,9 +12,18 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-MEMORY_KINDS = ("fact", "preference", "project", "decision", "correction", "note")
+MEMORY_KINDS = ("fact", "preference", "project", "decision", "correction", "note", "episode", "summary", "action")
 MEMORY_STATUSES = ("confirmed", "candidate", "superseded")
 MAX_MEMORY_CHARS = 4000
+MEETING_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def meeting_slug(name: str) -> str:
+    """A stable id from a human meeting name: 'Join Meeting #2' -> 'join-meeting-2'."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:64].strip("-")
+    return slug or "default"
+
+
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP = frozenset(["a", "an", "the", "is", "are", "was", "were", "of", "to", "and", "or", "in", "on", "for",
                    "with", "do", "does", "it", "this", "that", "i", "you", "we", "our", "my", "me", "what",
@@ -44,12 +53,15 @@ class MemoryScope:
 
     tenant_id: str
     user_id: str
+    meeting_id: str | None = None      # when set, reads and writes stay inside this meeting; never from model text
 
     def __post_init__(self) -> None:
         if not self.tenant_id.strip():
             raise ValueError("tenant_id is required")
         if not self.user_id.strip():
             raise ValueError("user_id is required")
+        if self.meeting_id is not None and not MEETING_ID.match(self.meeting_id):
+            raise ValueError("meeting_id must be a short lowercase slug (letters, digits, dashes)")
 
 
 @dataclass(frozen=True)
@@ -104,6 +116,16 @@ class MemoryItem:
             "supersedes_id": self.supersedes_id,
             "metadata": dict(self.metadata),
         }
+
+
+@dataclass(frozen=True)
+class MeetingSession:
+    """One numbered meeting inside a section (chat). `session_id` links it to the records written during it."""
+
+    number: int
+    session_id: str
+    started_at: datetime
+    ended_at: datetime | None = None
 
 
 @dataclass(frozen=True)

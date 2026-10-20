@@ -203,7 +203,7 @@ def test_soft_denial_flips_when_the_name_arrives_late_and_hold_timeout_fails_sil
             await until(lambda: eng._gates[1].state == "allowed")
             s.push(TurnComplete(1))
             await until(lambda: eng.playback.results)
-        eng2, (s2,), _, ad2 = mk(factor=0.1, params=LiveParams(hold_ms=80))
+        eng2, (s2,), _, ad2 = mk(factor=0.1, params=LiveParams(hold_ms=80, transcript_grace_s=0.0))
         async with running(eng2):
             s2.push(*audio(1, 3))                                          # no transcript ever arrives
             await until(lambda: eng2.metrics.counters["gate_denied"] == 1)
@@ -394,8 +394,9 @@ def test_tool_calls_are_validated_gated_and_results_returned_to_the_model():
             await until(lambda: len(s.tool_results) == 5)
             by = {cid: res for cid, _, res in s.tool_results}
             assert by["1"] == {"result": [{"id": "p1", "text": "refunds take five days"}]}
-            assert by["2"] == {"error": "side_effect_requires_approval"} and eng.approvals_needed == ["crm_note"]
-            assert by["3"] == {"error": "not_granted"} and by["4"]["error"].startswith("bad_args") and by["5"]["error"].startswith("bad_args")
+            assert by["2"]["error"] == "side_effect_requires_approval" and eng.approvals_needed == ["crm_note"]
+            assert by["3"]["error"] == "not_granted" and by["4"]["error"].startswith("bad_args") and by["5"]["error"].startswith("bad_args")
+            assert all("never stay silent" in by[k]["say"].lower() for k in ("2", "3", "4", "5"))     # failures always carry the speak hint
             assert calls == ["refund window"]                                # the side-effect and ungranted tools NEVER ran
     run(go())
 
@@ -614,4 +615,47 @@ def test_participant_events_and_malformed_meeting_events_do_not_break_the_sessio
             await until(lambda: eng.metrics.counters["meeting_event_invalid"] == 2)
             assert eng.participants.get("z").display_name == "Zed" and eng.participants.get("dup") is None
             assert eng.status == "active"
+    run(go())
+
+
+def test_answer_after_a_tool_call_in_an_allowed_turn_is_not_dropped_for_missing_transcript():
+    async def go():
+        ex, _ = tool_exec()
+        eng, (s,), _, _ = mk(tools=ex, factor=0.1, params=LiveParams(hold_ms=60, transcript_grace_s=0.0))
+        async with running(eng):
+            s.push(InputTranscript("Tara, what did we discuss last time?", True), *audio(1, 2))
+            await until(lambda: eng._gates and eng._gates[1].state == "allowed")
+            s.push(ToolCallRequested((ToolRequest("1", "lookup", {"query": "last time"}),)), TurnComplete(1))
+            await until(lambda: len(s.tool_results) == 1)
+            s.push(*audio(2, 3))                                 # the answer: no new input transcript exists
+            await until(lambda: eng.metrics.counters["gate_allowed"] == 2)
+            assert eng.metrics.counters["gate_denied"] == 0
+    run(go())
+
+
+def test_continuation_after_a_denied_turn_stays_denied():
+    async def go():
+        ex, _ = tool_exec()
+        eng, (s,), _, _ = mk(tools=ex, factor=0.1, params=LiveParams(hold_ms=60, transcript_grace_s=0.0))
+        async with running(eng):
+            s.push(InputTranscript("so anyway the quarterly numbers look fine", True), *audio(1, 2))
+            await until(lambda: eng._gates and eng._gates[1].state == "denied")
+            s.push(ToolCallRequested((ToolRequest("1", "lookup", {"query": "x"}),)), TurnComplete(1))
+            await until(lambda: len(s.tool_results) == 1)
+            s.push(*audio(2, 3))
+            await until(lambda: eng.metrics.counters["gate_denied"] == 2)
+            assert eng.metrics.counters["gate_allowed"] == 0
+    run(go())
+
+
+def test_a_failed_tool_never_leaves_the_model_without_an_answer_and_silence_is_broken():
+    async def go():
+        ex, _ = tool_exec()
+        eng, (s,), _, _ = mk(tools=ex, params=LiveParams(error_watch_s=0.1))
+        async with running(eng):
+            s.push(ToolCallRequested((ToolRequest("1", "secret", {}),)))                  # not granted: fails
+            await until(lambda: len(s.tool_results) == 1)
+            assert "never stay silent" in s.tool_results[0][2]["say"].lower()
+            await until(lambda: eng.metrics.counters["live_error_prompts"] == 1)           # the model said nothing, so it is asked
+            assert len(s.texts) == 1 and "failed" in s.texts[0] and "secret" in s.texts[0]
     run(go())

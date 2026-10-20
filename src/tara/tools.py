@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 from .config import ToolSpec
 from .contracts import Passage, ToolCall, ToolResult
-from .errors import ProviderError, ToolError
+from .errors import PermissionDenied, ProviderError, ToolError
 from .metrics import Metrics
 
 
@@ -144,6 +144,9 @@ class ToolExecutor:
             # Provider messages may contain request details; only the class is exposed.
             return self._finish(call, call_id, t0, f"error:{type(e).__name__}",
                                 error=f"tool_error:{type(e).__name__}", retryable=True)
+        except PermissionDenied as e:     # our own fixed message, safe to show the model
+            return self._finish(call, call_id, t0, "error:PermissionDenied", error="tool_error:PermissionDenied",
+                                details={"reason": str(e)[:200]})
         except Exception as e:  # noqa: BLE001 - tool failure is reported, not hidden, never retried
             return self._finish(call, call_id, t0, f"error:{type(e).__name__}", error=f"tool_error:{type(e).__name__}")
         self._finish(call, call_id, t0, "executed")

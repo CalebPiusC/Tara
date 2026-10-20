@@ -117,7 +117,7 @@ def test_recall_is_read_only_and_does_not_require_the_write_gate():
             session.push(ToolCallRequested((ToolRequest("c1", "recall_memory", {"query": "Testflow pricing"}),)))
             await until(lambda: len(session.tool_results) == 1)
             result = session.tool_results[0][2]["result"]
-            assert result and "ten dollars" in result[0]["text"]
+            assert result and "ten dollars" in result["memories"][0]["text"]
         finally:
             await engine.close()
     run(go())

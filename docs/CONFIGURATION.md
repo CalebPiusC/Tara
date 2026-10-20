@@ -26,7 +26,7 @@ See [ORCHESTRATION](ORCHESTRATION.md) for behavior, provider limits and limitati
 | `TARA_TOOLS_TIME` / `TARA_TOOLS_CALCULATOR` | local time-zone and safe arithmetic tools; default `1` |
 | `TARA_TOOLS_LOCATION` / `TARA_TOOLS_WEATHER` | Open-Meteo geocoding and weather; default `1` |
 | `TARA_TOOLS_FETCH` | public-page retrieval with SSRF checks; default `1` |
-| `TARA_TOOLS_SEARCH` / `TARA_SEARCH_PROVIDER` / `TARA_SEARCH_API_KEY` | Brave search; disabled by default, key required when enabled |
+| `TARA_TOOLS_SEARCH` / `TARA_SEARCH_PROVIDER` / `TARA_SEARCH_API_KEY` | web search (`brave` or `tavily`); disabled by default, key required when enabled |
 | `TARA_TOOLS_RESEARCH` / `TARA_TOOLS_BACKGROUND` | bounded research and in-process task tools; default `1` |
 | `TARA_TOOLS_MAX_CALLS_PER_TURN` | Live per-turn tool budget; default `8` |
 | `TARA_TOOLS_SEARCH_SESSION_LIMIT` | search/research calls per session; default `8` |

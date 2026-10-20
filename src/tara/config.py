@@ -80,6 +80,7 @@ class MeetingConfig:
     retain_audio: bool = False
     approved_knowledge_ids: tuple[str, ...] = ()
     no_commitments: tuple[str, ...] = ()
+    lead_interview: bool = False         # Tara leads: a candidate's turn (reliable identity) is always answered; style of a 1:1 interview
     schema: str = SCHEMA
 
 

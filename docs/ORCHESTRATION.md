@@ -1,6 +1,6 @@
 # Orchestration tools: time, location, weather, search and bounded research
 
-**Status: implemented and tested offline (428 tests; `ruff` and `mypy` clean). Open-Meteo geocoding/weather, countries.dev country facts, and bounded public-page retrieval were exercised against the real services on 2026-10-20. Brave web search is implemented behind `SearchProvider` but has not been called live because no `TARA_SEARCH_API_KEY` was available. No latency number is claimed; the metrics exist, but they have not been measured in a real meeting. Nothing here connects to Google Meet, sends messages, spends money, or changes account settings.**
+**Status: implemented and tested offline (462 tests; `ruff` and `mypy` clean). Open-Meteo geocoding/weather, countries.dev country facts, and bounded public-page retrieval were exercised against the real services on 2026-10-20. Brave and Tavily web search are implemented behind `SearchProvider` (`TARA_SEARCH_PROVIDER`), but neither has been called live because no `TARA_SEARCH_API_KEY` was available. No latency number is claimed; the metrics exist, but they have not been measured in a real meeting. Nothing here connects to Google Meet, sends messages, spends money, or changes account settings.**
 
 Written 2026-10-20. Provider facts and access dates: [research/SOURCES.md](research/SOURCES.md) for voice/model sources; external-provider sources are cited inline below.
 
@@ -30,7 +30,7 @@ ToolExecutor.execute_read_only    grant check, argument types, timeout, audit, s
         +--> research.py        research, start_research, research_status, research_result, cancel_research
 ```
 
-All orchestration tools are **read-only** (`side_effect=False`) and take a bounded timeout. There is no shell, code execution, arbitrary filesystem access, credential access, outbound POST, or account-changing action. The only write-like action in the product remains the separately granted `record_note` tool.
+All orchestration tools are **read-only** (`side_effect=False`) and take a bounded timeout. There is no shell, code execution, arbitrary filesystem access, credential access, model- or user-directed outbound POST, or account-changing action. The only network POST is the search client calling its own fixed provider endpoint with a bounded JSON body. The only write-like action in the product remains the separately granted `record_note` tool.
 
 ## Tool contracts
 
@@ -63,7 +63,7 @@ The model sees declarations only for tools that are both registered and granted.
 | `country_info` | countries.dev | Capital, region, population, currencies, languages, ISO codes. Keyless, but a custom User-Agent is required (the default Python agent received HTTP 403). [countries.dev](https://countries.dev/), accessed 2026-10-20 |
 | `get_time_at_place` | Open-Meteo geocoding + `zoneinfo` | Geocodes first, then returns the time in the place's timezone; the result still says when the match was assumed |
 | `get_weather` | Open-Meteo forecast | Current conditions and up to 7 forecast days; WMO description; observation time; attribution. **No official weather alerts are supplied, so the tool always reports none; the model must not invent one.** [Open-Meteo docs](https://open-meteo.com/en/docs), [terms](https://open-meteo.com/en/terms), accessed 2026-10-20 |
-| `web_search` | Brave Search API behind `SearchProvider` | Title, URL, snippet, page age and publisher when the provider returns them; public-URL filtering; duplicate URLs removed. [Brave Search API](https://brave.com/search/api/), accessed 2026-10-20 |
+| `web_search` | Brave or Tavily behind `SearchProvider` | Title, URL, snippet and publication age (publisher only when the provider returns it); public-URL filtering; duplicate URLs removed. [Brave Search API](https://brave.com/search/api/), [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search), both accessed 2026-10-20 |
 | `fetch_url` | `SafeFetcher` | Public HTTP(S) only; SSRF checks; bounded bytes and characters; HTML text extraction; no scripts or styles in the text |
 | `research` | `ResearchService` | One search plus a few pages, bounded by time, sources and characters; source ids and URLs; partial-failure warnings |
 | `start_research` | `ResearchTaskManager` | In-process background task. Returns an id and `status=queued`; that is an acknowledgement, not a result |
@@ -76,6 +76,7 @@ The model sees declarations only for tools that are both registered and granted.
 - **Open-Meteo:** free API for non-commercial use, data under CC BY 4.0; published limits are below 10,000 calls/day, 5,000/hour and 600/minute. The tool reports the attribution string and observation time. These limits were read on 2026-10-20 and can change; they are not enforced by a local rate limiter yet, only by caching and per-session research budgets.
 - **countries.dev:** keyless country facts; a custom User-Agent is required. No availability SLA is assumed.
 - **Brave:** paid plan reported at $5 per 1,000 requests with a $5 monthly credit and 50 requests/second; checked 2026-10-20. Search is **off by default** and needs `TARA_SEARCH_API_KEY`. No live Brave request was made in this work because no key was provided.
+- **Tavily:** free "Researcher" plan reported at 1,000 API credits/month with no credit card required; a basic search costs 1 credit; checked 2026-10-20. Tara calls `POST /search` with `search_depth=basic` and `include_answer=false`, so it stays a retrieval tool and makes no provider-side model call. The plan can change without notice; check the pricing page before relying on it. No live Tavily request was made in this work because no key was provided.
 - No new Python dependency was added. Providers use `urllib` in a worker thread so network waits do not block the Live audio loop.
 
 ## Time-zone rules
@@ -119,7 +120,7 @@ This is intentionally smaller than a task queue. There is no Redis, worker proce
 ## Permissions and safety
 
 - All orchestration tools are read-only and code-granted. The model cannot grant itself a tool or expand a scope.
-- No arbitrary shell, code execution, credential access, unrestricted filesystem access, outbound POST, purchase, message send, or account-setting change is exposed.
+- No arbitrary shell, code execution, credential access, unrestricted filesystem access, model-directed outbound request, purchase, message send, or account-setting change is exposed. The one POST is the search provider client calling its fixed endpoint.
 - Retrieved pages, search snippets, country facts and weather text are **untrusted data**. The model is instructed to cite, not obey, them.
 - Tool errors are typed and content-free. Provider bodies, API keys and page content are not logged or put in `ToolResult.details`.
 - Search is off unless the operator enables it and supplies a key. Location, weather and public-page fetch can be disabled independently. `research` is registered only when search and fetch are both available.
@@ -146,12 +147,13 @@ Measured metrics (names only; no query text, page text, transcripts or keys):
 
 ## Tests
 
-Offline (no network, no key): `.venv/bin/python -m pytest -q` → **428 passed, 7 deselected** on 2026-10-20. The orchestration tests cover:
+Offline (no network, no key): `.venv/bin/python -m pytest -q` → **462 passed, 6 skipped, 7 deselected** on 2026-10-20. The orchestration tests cover:
 
 - time zones, DST spring-forward gaps and fall-back ambiguity;
 - safe arithmetic, rejected code/name/comprehension expressions, unit conversion;
 - geocoding ambiguity, country facts, weather parsing, attribution, no invented alerts;
-- Brave response parsing, deduplication, auth/rate-limit/server failures;
+- Brave and Tavily response parsing, POST body and auth header, deduplication, public-URL filtering, auth/quota/rate-limit/server failures;
+- provider selection from settings, and a settings error for an unknown provider name;
 - SSRF rejection, private DNS answers, HTML extraction, truncation, content-type errors;
 - research deduplication, partial page failures, session budget, task completion/cancellation/timeout/limit;
 - settings validation and secret redaction;
@@ -163,7 +165,11 @@ Real-provider tier (network, still no model call):
 TARA_EXTERNAL_TESTS=1 .venv/bin/python -m pytest -m external tests/external -q
 ```
 
-On 2026-10-20 that produced `2 passed, 1 skipped`: Open-Meteo geocoding/weather/countries.dev and `https://example.com/` retrieval passed; Brave was skipped because `TARA_SEARCH_API_KEY` was unset. These are **provider checks**, not evidence that the Live model behaves well.
+The search check runs only when `TARA_SEARCH_API_KEY` is set and uses whichever provider
+`TARA_SEARCH_PROVIDER` selects (Brave by default). On 2026-10-20 the tier produced
+`2 passed, 1 skipped`: Open-Meteo geocoding/weather/countries.dev and `https://example.com/`
+retrieval passed; search was skipped because `TARA_SEARCH_API_KEY` was unset. These are
+**provider checks**, not evidence that the Live model behaves well.
 
 The live Gemini tier is separate and unchanged: `-m live_api`, `TARA_LIVE_TEST=1`, a Gemini key and a model id. Nothing in this work ran that tier.
 
@@ -177,7 +183,7 @@ See `.env.example` and [CONFIGURATION](CONFIGURATION.md). The main switches are:
 | `TARA_TOOLS_TIME` / `TARA_TOOLS_CALCULATOR` | `1` | Local, free tools |
 | `TARA_TOOLS_LOCATION` / `TARA_TOOLS_WEATHER` | `1` | Open-Meteo geocoding and weather |
 | `TARA_TOOLS_FETCH` | `1` | Public-page retrieval |
-| `TARA_TOOLS_SEARCH` | `0` | Brave search; also requires `TARA_SEARCH_API_KEY` |
+| `TARA_TOOLS_SEARCH` | `0` | Web search (`TARA_SEARCH_PROVIDER=brave|tavily`); also requires `TARA_SEARCH_API_KEY` |
 | `TARA_TOOLS_RESEARCH` | `1` | Only registered when search + fetch are usable |
 | `TARA_TOOLS_BACKGROUND` | `1` | `start_research` and task tools |
 | `TARA_TOOLS_MAX_CALLS_PER_TURN` | `8` | Engine per-turn budget |
@@ -188,7 +194,7 @@ See `.env.example` and [CONFIGURATION](CONFIGURATION.md). The main switches are:
 
 ## Limitations and not done
 
-- **Brave is unverified live**; no key was available. The adapter's real auth/rate-limit behavior is not claimed.
+- **Web search is unverified live** for both Brave and Tavily; no key was available. Neither adapter's real auth/rate-limit behavior is claimed.
 - No direct-answer/search-grounding model call. Search returns sources; the model must reason over them and cite.
 - No user-location service. A location is only what the conversation or the tool argument says.
 - Background tasks are not durable and do not notify the conversation automatically. The model must poll; this is deliberate to avoid stale interruptions.

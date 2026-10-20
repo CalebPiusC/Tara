@@ -23,7 +23,8 @@ def est_tokens(s: str) -> int:
 
 def sanitize(s: str) -> str:
     """Neutralize our delimiters so data cannot close its own wrapper."""
-    for tag in ("</transcript>", "<transcript>", "</doc>", "<doc", "</tool_result>", "<tool_result"):
+    for tag in ("</transcript>", "<transcript>", "</doc>", "<doc", "</tool_result>", "<tool_result", "</facts>", "<facts>",
+                "</brief>", "<brief>", "</candidate_text>", "<candidate_text>"):
         s = s.replace(tag, "")
     return s
 

@@ -27,6 +27,9 @@ def migrate(dsn: str, *, schema: str | None = None) -> None:
             conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
             conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
         conn.execute(_sql("001_memory.sql"))
+        conn.execute(_sql("002_meetings.sql"))
+        conn.execute(_sql("003_sessions.sql"))
+        conn.execute(_sql("004_session_delete.sql"))
         conn.commit()
 
 
