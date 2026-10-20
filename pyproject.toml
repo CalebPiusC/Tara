@@ -23,8 +23,9 @@ pythonpath = ["src"]
 markers = [
   "offline: no network, no models (default)",
   "live_api: real Gemini Live API call; opt-in only (TARA_LIVE_TEST=1 plus key and model id)",
+  "external: real public HTTP provider check; opt-in only (TARA_EXTERNAL_TESTS=1)",
 ]
-addopts = "-m 'not live_api'"
+addopts = "-m 'not live_api and not external'"
 
 [tool.ruff]
 line-length = 130

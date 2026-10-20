@@ -71,7 +71,7 @@ from .playback import PlaybackController
 from .registry import SessionRegistry
 
 SOFT_DENY = frozenset({"not_addressed", "no_transcript", "low_intent_confidence"})   # may flip as more transcript arrives
-TOOL_RESULT_MAX_CHARS = 4000
+TOOL_RESULT_MAX_CHARS = 12_000
 
 
 @dataclass
@@ -84,6 +84,7 @@ class LiveParams:
     local_barge_in: bool = True        # stop playback on local speech BEFORE the provider reports it
     hybrid_end_of_speech: bool = False  # send audio_stream_end when local VAD sees speech end (benefit unverified)
     max_tool_tasks: int = 4
+    max_tool_calls_per_turn: int = 8
     self_stream_id: str = "tara"
     attribution_window_s: float = 6.0
     min_local_speech_ms: int = 150     # blips shorter than this never cancel playback
@@ -151,6 +152,7 @@ class LiveVoiceEngine:
         self._tasks: set[asyncio.Task] = set()
         self._tool_tasks: dict[str, asyncio.Task] = {}
         self._tool_sem = asyncio.Semaphore(self.p.max_tool_tasks)
+        self._tool_calls_turn = 0
         self._uplink: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=self.p.uplink_queue)
         self._segmenters: dict[str, Segmenter] = {}
         self._speaker_seen: dict[str, float] = {}
@@ -533,6 +535,7 @@ class LiveVoiceEngine:
         self._commit_participant_turn()
         self._prune_gates()
         self._deny_turn_audio = False       # the command's own turn is over; later replies may play
+        self._tool_calls_turn = 0           # a new model turn gets a fresh bounded tool budget
 
     def _finalize_gate(self, g: _Gate) -> None:
         self.playback.finish(g.rid)
@@ -600,6 +603,7 @@ class LiveVoiceEngine:
                 self._local_interrupt_rid = None   # the local path already split the turn; keep the new transcript
             else:
                 self._commit_participant_turn_reset()
+        self._tool_calls_turn = 0
 
     def _commit_participant_turn_reset(self) -> None:
         self._turn_text = ""      # the interrupter's speech is a NEW turn; its transcript arrives after this event
@@ -915,13 +919,20 @@ class LiveVoiceEngine:
     # ---- tools -------------------------------------------------------------------------------------------------------
     async def _run_tool(self, req: ToolRequest, gen: int) -> None:
         sess = self._session
+        queued_at = time.perf_counter()
         try:
-            if self.tools is None:
-                payload: dict[str, Any] = {"error": "tools_unavailable"}
+            if self._tool_calls_turn >= self.p.max_tool_calls_per_turn:
+                self.metrics.inc("live_tool_budget_denied")
+                payload: dict[str, Any] = {"error": "tool_budget_exceeded",
+                                           "details": {"limit": self.p.max_tool_calls_per_turn}}
+            elif self.tools is None:
+                payload = {"error": "tools_unavailable"}
             elif self._tool_sem.locked() and len(self._tool_tasks) > self.p.max_tool_tasks * 2:
                 payload = {"error": "busy"}
             else:
+                self._tool_calls_turn += 1
                 async with self._tool_sem:
+                    self.metrics.observe("live_tool_queue_ms", (time.perf_counter() - queued_at) * 1000)
                     cid = f"live:{self.session_id}:{req.call_id}"
                     self._st(ToolQueued(cid, ToolCall(req.name, {})))
                     try:
@@ -937,6 +948,10 @@ class LiveVoiceEngine:
                     payload = {"result": _jsonable(res.output)}
                 else:
                     payload = {"error": res.error or "failed"}
+                    if res.retryable:
+                        payload["retryable"] = True
+                    if res.details:
+                        payload["details"] = _jsonable(res.details)
                     if res.error == "side_effect_requires_approval" or res.pending_approval:
                         self.approvals_needed.append(req.name)
             if gen != self._session_gen or self._session is not sess or sess is None or self._closing:

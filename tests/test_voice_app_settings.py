@@ -57,7 +57,10 @@ def test_app_runs_a_scripted_turn_end_to_end_with_no_local_models():
             assert h["status"] == "active" and h["key"] == "set" and "SECRET-123" not in json.dumps(h)
             cfg_sent = app.provider.opened[0][0]
             assert "Tara" in cfg_sent.system_instruction and cfg_sent.context_compression
-            assert [t.name for t in cfg_sent.tools] == ["record_note"]     # notes mode is on by default
+            names = [t.name for t in cfg_sent.tools]
+            assert "record_note" in names and "get_time" in names
+            assert "web_search" not in names and "start_research" not in names   # search needs a key
+            assert "Use the provided tools" in cfg_sent.system_instruction
             sess.push(InputTranscript("Tara, hello there", True), ResponseAudio(1, b"\x00\x00" * 2400), TurnComplete(1))
             end = asyncio.get_event_loop().time() + 3
             while not app.playback.results and asyncio.get_event_loop().time() < end:

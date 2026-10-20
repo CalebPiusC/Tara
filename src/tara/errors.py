@@ -1,8 +1,26 @@
 """Shared exception types. Providers raise these; callers decide recovery."""
+from __future__ import annotations
+
+from typing import Any
 
 
 class TaraError(Exception):
     pass
+
+
+class ToolError(TaraError):
+    """A tool failed in a way the model may report and recover from.
+
+    `code` is stable and safe to show to the model; `details` must never contain
+    secrets or raw provider bodies. Text is bounded and content-free.
+    """
+
+    def __init__(self, code: str, message: str, *, retryable: bool = False,
+                 details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.details = dict(details or {})
 
 
 class ProviderError(TaraError):
