@@ -61,3 +61,11 @@ R1-R7 are listed with what each established in [RAG_TECHNOLOGY_EVALUATION.md](RA
 | M1 | https://help.openai.com/en/articles/8590148-memory-faq | ChatGPT keeps saved memories it may add on its own or on request; users can view, delete or turn off; the page says it describes a legacy experience |
 | M2 | https://help.openai.com/en/articles/11146739-how-does-reference-saved-memories-work | automatic reference to past chat history, separate toggle, not every detail is kept |
 | M3 | https://www.tomsguide.com/ai/claude-just-unlocked-memory-that-syncs-with-chatgpt-heres-how-it-works | reported: Claude memory is separated per project; third-party report, no official Anthropic page was read, so the mechanism is unverified |
+
+## Google Meet bot (accessed 2026-10-21; search-tool summaries, not full reads)
+| # | Source | Established |
+|---|---|---|
+| M4 | https://developers.google.cn/workspace/meet/media-api/guides/get-started | Meet Media API is limited to the Developer Preview Program; the Cloud project, the OAuth principal and all participants in the conference must be enrolled; required codecs and header extensions; clients send periodic metrics |
+| M5 | https://www.recall.ai/blog/what-is-the-google-meet-media-api | third-party: audio and video for only the three most relevant participants, no breakout rooms, no transcripts, fails if a non-enrolled participant is present; sending audio into a meeting is not described. Dated and unofficial, so recheck |
+| M6 | https://developers.google.com/workspace/meet/api/reference/rest/v2/spaces/create | `POST https://meet.googleapis.com/v2/spaces` needs the scope `https://www.googleapis.com/auth/meetings.space.created`; one third-party page lists a different scope name, treated as wrong |
+| SDK | Playwright (Python) with `channel="chrome"` against the installed Google Chrome 155 | launches the installed browser, no browser download; WebRTC and Web Audio verified in local tests only |

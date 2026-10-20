@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -19,9 +21,17 @@ from .docgen.composer import KINDS, DocumentComposer, LlmTextGenerator, fallback
 from .docgen.model import DocStyle, parse_markdown
 from .docgen.store import FORMATS, DocumentStore
 from .errors import PermissionDenied, ToolError
+from .hiring.evaluator import AnswerEvaluator
 from .hiring.intake import CandidateBuilder
-from .hiring.interview import InterviewError, InterviewResult, InterviewSession, result_facts
-from .hiring.planner import InterviewPlan, QuestionPlanner
+from .hiring.interview import (
+    InterviewError,
+    InterviewExpired,
+    InterviewResult,
+    InterviewSession,
+    InterviewState,
+    result_facts,
+)
+from .hiring.planner import InterviewPlan, Question, QuestionPlanner
 from .hiring.profile import CandidateProfile
 from .hiring.workspace import Workspace, WorkspaceError, check_id
 from .jobs import JobBoard, JobLimitReached
@@ -90,7 +100,8 @@ class WorkServices:
                  send_note: Callable[[str], None] | None = None, candidate_speakers: frozenset[str] = frozenset(),
                  recorder_llm: LanguageModelProvider | None = None, memory_gate: MemoryWriteGate | None = None,
                  speak: Callable[[str], Awaitable[None]] | None = None,
-                 on_kind: Callable[[str | None], None] | None = None):
+                 on_kind: Callable[[str | None], None] | None = None,
+                 monotonic: Callable[[], float] = time.monotonic):
         self.settings, self.session_id, self.scope, self.cfg = settings, session_id, scope, cfg
         self.roles, self.names, self.memory, self.working, self.control = roles, names, meeting_memory, working, control
         self.metrics = metrics or Metrics()
@@ -109,6 +120,14 @@ class WorkServices:
         self.last_result: InterviewResult | None = None
         self.last_plan: InterviewPlan | None = None
         self.last_brief = ""
+        self.monotonic = monotonic
+        self.evaluator = AnswerEvaluator(llm, timeout_s=settings.interview_eval_timeout_s, metrics=self.metrics)
+        self._interview_timer: asyncio.Task[None] | None = None
+        self._question_awaiting_playback = ""      # new question issued; its first completed playback starts the clock
+        self._live_answer = ""
+        self._live_answer_speaker = ""
+        self._answer_start_total = 0
+        self._welcome_delivered = False
         self.auto = AutoMemory(AutoMemoryConfig(settings.auto_memory, settings.auto_memory_ttl_days), session_id=session_id,
                                scope=scope, meeting_memory=meeting_memory, memory_service=memory_service,
                                memory_scope=memory_scope, metrics=self.metrics)
@@ -121,6 +140,7 @@ class WorkServices:
         self.vocab = Vocabulary(vfile, [t.strip() for t in settings.vocab_terms.split(",") if t.strip()] + list(names.values()))
         self.memory_gate = memory_gate
         self.speak, self.on_kind = speak, on_kind
+        self.send_note = send_note
         self.agenda = Agenda()
         self.clock = MeetingClock(self.agenda, speak if settings.nudges else None)
         self._clock_task: asyncio.Task[None] | None = None
@@ -141,8 +161,10 @@ class WorkServices:
 
     # ---- engine hooks ------------------------------------------------------------------------------------------
     def on_transcript(self, text: str, att: Attribution) -> None:
-        """Sync, early (finished input transcript): updates who is allowed to start or finish things."""
+        """Sync, early (finished input transcript): updates who is allowed to start or finish things, and captures the
+        answer text before the model's tool call arrives (the committed turn is only added after the model finishes)."""
         self.gate.observe(text, att)
+        self._observe_answer_text(text, att.participant_id or "")
 
     async def on_turn(self, turn: TurnRecord) -> None:
         """After a participant turn is committed. Never raises."""
@@ -151,6 +173,217 @@ class WorkServices:
             await self.recorder.on_turn()
         if self.nudger is not None:
             self.nudger.observe(turn.text)
+        self._observe_committed_answer(turn)
+
+    # ---- interview answer capture -------------------------------------------------------------------------------
+    @staticmethod
+    def _same_text(a: str, b: str) -> bool:
+        norm = lambda s: re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()  # noqa: E731 - tiny local normaliser
+        return bool(norm(a)) and norm(a) == norm(b)
+
+    def _is_candidate(self, participant_id: str | None) -> bool:
+        if not participant_id:
+            return False
+        return participant_id in self.candidate_speakers or self.roles.get(participant_id) is Role.CANDIDATE
+
+    def _observe_answer_text(self, text: str, participant_id: str) -> None:
+        """Keep the current answer visible to a tool call that arrives before TurnComplete."""
+        if self.session is None or self.session.done or not self._is_candidate(participant_id):
+            return
+        progress = self.session.current_question()
+        if progress is None or progress.finalized:
+            return
+        if self.session.state not in (InterviewState.WAITING_FOR_ANSWER, InterviewState.RETRYING_QUESTION):
+            return
+        text = text.strip()
+        if not text:
+            return
+        if any(self._same_text(a.answer, text) for a in progress.attempts):
+            return
+        if self._live_answer and text.startswith(self._live_answer):
+            self._live_answer = text
+        elif self._live_answer and self._live_answer.startswith(text):
+            pass
+        elif self._live_answer and not self._same_text(self._live_answer, text):
+            self._live_answer = (self._live_answer + " " + text).strip()
+        else:
+            self._live_answer = text
+        self._live_answer_speaker = participant_id
+
+    def _observe_committed_answer(self, turn: TurnRecord) -> None:
+        if self.session is None or self.session.done or not self._is_candidate(turn.speaker_id):
+            return
+        progress = self.session.current_question()
+        if progress is None or progress.finalized:
+            return
+        if self.session.state not in (InterviewState.WAITING_FOR_ANSWER, InterviewState.RETRYING_QUESTION):
+            return
+        if any(self._same_text(a.answer, turn.text) for a in progress.attempts):
+            return
+        if not self._live_answer:
+            self._live_answer, self._live_answer_speaker = turn.text.strip(), turn.speaker_id or ""
+        elif not self._same_text(self._live_answer, turn.text) and turn.text not in self._live_answer:
+            self._live_answer = (self._live_answer + " " + turn.text).strip()
+            self._live_answer_speaker = self._live_answer_speaker or (turn.speaker_id or "")
+
+    def _answer_text(self) -> str:
+        if self._live_answer.strip():
+            return self._live_answer.strip()
+        if self.session is None:
+            return ""
+        # Fallback for providers that do not send early transcripts: use candidate turns after the question started.
+        turns = list(self.working.turns)
+        start = max(0, len(turns) - max(0, self.working.total_turns - self._answer_start_total))
+        candidate_names = {self.names.get(pid, pid) for pid in self.candidate_speakers}
+        parts = [text for speaker, text in turns[start:] if speaker in candidate_names or speaker == "participant"]
+        return " ".join(parts).strip()
+
+    def _interview_transcript(self) -> tuple[tuple[str, str], ...]:
+        turns = tuple(self.working.turns)
+        answer = self._answer_text()
+        if not answer:
+            return turns
+        speaker = self._live_answer_speaker or next(iter(self.candidate_speakers), "candidate")
+        if any(self._same_text(text, answer) for name, text in turns if name != "Tara"):
+            return turns
+        return turns + ((speaker, answer),)
+
+    def _reset_answer(self) -> None:
+        self._live_answer, self._live_answer_speaker = "", ""
+        self._answer_start_total = self.working.total_turns
+
+    async def _wait_for_answer(self) -> str:
+        deadline = self.monotonic() + self.settings.interview_answer_grace_s
+        while self.monotonic() < deadline:
+            answer = self._answer_text()
+            if answer:
+                return answer
+            await asyncio.sleep(0.1)
+        return self._answer_text()
+
+    def _create_interview(self, prof: CandidateProfile, plan: InterviewPlan) -> InterviewSession:
+        return InterviewSession(plan, prof.candidate_id, self._interview_transcript,
+                                candidate_speakers=self.candidate_speakers,
+                                monotonic=self.monotonic,
+                                question_limit_s=self.settings.interview_question_limit_s,
+                                retry_limit=self.settings.interview_retry_limit)
+
+    @staticmethod
+    def _plan_question(session: InterviewSession, qid: str) -> Question:
+        return next(q for q in session.plan.questions if q.qid == qid)
+
+    def mark_welcome_delivered(self) -> None:
+        """Called after the opening prompt really goes out, so a reconnect cannot repeat the welcome."""
+        self._welcome_delivered = True
+        if self.session is not None and not self.session.done:
+            self.session.mark_welcomed()
+
+    def _cancel_question_timer(self) -> None:
+        task, self._interview_timer = self._interview_timer, None
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not None and task is not current and not task.done():
+            task.cancel()
+
+    def _schedule_question_timer(self, qid: str) -> None:
+        self._cancel_question_timer()
+        if self.session is None or self.session.done:
+            return
+        progress = self.session.current_question()
+        if progress is None or progress.qid != qid or progress.finalized:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        delay = max(0.0, progress.deadline - self.monotonic())
+        self._interview_timer = loop.create_task(self._question_deadline(qid, delay),
+                                                 name=f"{self.session_id}:interview-deadline:{qid}")
+
+    def on_playback_finished(self, response_id: int, *, completed: bool, cancelled: bool) -> None:
+        """The composition root calls this when one of Tara's audio responses finishes.
+
+        The API gives us response-level completion, not a word-level marker for the question. The first completed
+        playback after a new question is therefore the safest available start: it covers the common case where the
+        model asks the question in that response, while a muted/failed voice path keeps the tool-return fallback. A
+        cancelled, failed or duplicate callback never moves the deadline, and a retry never re-arms it.
+        """
+        if not self._question_awaiting_playback:
+            return
+        if not completed or cancelled:
+            self.metrics.inc("interview_question_playback_incomplete")
+            return                      # keep waiting: an interrupted question may be re-asked
+        qid, self._question_awaiting_playback = self._question_awaiting_playback, ""
+        if self.session is None or self.session.done:
+            return
+        progress = self.session.current_question()
+        if progress is None or progress.qid != qid or progress.finalized or progress.attempts:
+            return
+        if not self.session.start_question_clock(qid):
+            return
+        self._schedule_question_timer(qid)
+        self.metrics.inc("interview_question_clocks_started")
+
+    async def _speak_instruction(self, text: str) -> None:
+        if self.speak is not None:
+            try:
+                await self.speak(text)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - fall through to a quiet note; the deadline is already recorded
+                self.metrics.inc("interview_timeout_prompt_failures")
+        if self.send_note is not None:
+            self.send_note(text)
+
+    def _advance_after_timeout(self, decision: dict[str, Any]) -> dict[str, Any] | None:
+        """Move past a timed-out question exactly once, whether the timer or a late tool call noticed first."""
+        if self.session is None or self.session.done:
+            return None
+        current = self.session.current_question()
+        if current is None or current.qid != decision.get("qid"):
+            return None                 # the timer already advanced; never cancel or reset the next question's timer
+        self._cancel_question_timer()
+        self._reset_answer()
+        if decision.get("next_action") != "next_question":
+            self._question_awaiting_playback = ""
+            return None
+        try:
+            next_payload = self.session.next_question()
+        except InterviewError:
+            self.metrics.inc("interview_timeout_advance_failures")
+            return None
+        if next_payload.get("done"):
+            self._question_awaiting_playback = ""
+            return None
+        self._reset_answer()
+        self._question_awaiting_playback = next_payload["qid"]
+        self._schedule_question_timer(next_payload["qid"])
+        return next_payload
+
+    async def _question_deadline(self, qid: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if self.session is None or self.session.done:
+                return
+            decision = self.session.expire_current(qid=qid)
+            if decision is None:
+                return
+            self.metrics.inc("interview_question_timeouts")
+            next_payload = self._advance_after_timeout(decision)
+            if next_payload is not None:
+                await self._speak_instruction(
+                    "The three-minute limit for that question has been reached. Say only that time is up for that question, "
+                    f"without evaluating the incomplete answer or revealing an expected answer. Then ask this next question "
+                    f"naturally in your own words: {next_payload['question']}")
+            else:
+                await self._speak_instruction(
+                    "The three-minute limit for that question has been reached. Say only that time is up, without evaluating "
+                    "the incomplete answer. Then call finish_interview and thank the candidate.")
+        except asyncio.CancelledError:
+            return
 
     # ---- tools -----------------------------------------------------------------------------------------------------
     @property
@@ -191,11 +424,14 @@ class WorkServices:
         if self.settings.hiring:
             lines.append("You can interview candidates. Use list_candidates and get_candidate to see prepared briefs; prepare_candidate "
                          "builds one from a CV file in the inbox, a portfolio link and a GitHub user. To interview: start_interview, then "
-                         "ask questions one at a time from interview_next_question, listen, follow up when an answer is thin, and after "
-                         "each answer call interview_record_answer with a score 0-4 for one criterion and an EXACT quote of the "
-                         "candidate's words. Never score without a quote. Do not use or ask about age, gender, family, religion, "
-                         "nationality, health or appearance. At the end call finish_interview and say the result supports a human "
-                         "decision; never say hire or reject.")
+                         "ask questions one at a time from interview_next_question. After the candidate finishes an answer, call "
+                         "interview_record_answer with the qid only. The application evaluates the meaning of the answer against the "
+                         "question, accepts different wording and valid alternative approaches, and returns needs_retry and "
+                         "should_advance. Never read out scores, correctness labels, missing concepts or other internal fields. If "
+                         "needs_retry is true, give one short proportional hint and ask them to try once more; do not reveal the "
+                         "expected answer. If it is false, acknowledge only what the answer actually showed, then continue. Do not "
+                         "use or ask about age, gender, family, religion, nationality, health or appearance. At the end call "
+                         "finish_interview and say the result supports a human decision; never say hire or reject.")
         return "\n".join(lines)
 
     # ---- documents ---------------------------------------------------------------------------------------------------
@@ -461,19 +697,23 @@ class WorkServices:
             self.gate.require("starting an interview")
             if self.session is not None and not self.session.done:
                 raise tool_failure("already_running", "An interview is already in progress; finish it first")
+            self._cancel_question_timer()
             try:
                 d = self.workspace.load_candidate(check_id(candidate_id.strip().lower()))
             except WorkspaceError as exc:
                 raise tool_failure("no_candidate", "No prepared candidate with that id") from exc
             prof = CandidateProfile.from_dict(d["profile"])
             plan = InterviewPlan.from_dict(d["plan"])
-            self.session = InterviewSession(plan, prof.candidate_id, lambda: tuple(self.working.turns),
-                                            candidate_speakers=self.candidate_speakers)
+            self.session = self._create_interview(prof, plan)
             self.last_plan, self.last_brief, self.last_result = plan, prof.brief(), None
+            self._reset_answer()
+            self._question_awaiting_playback = ""
+            self._welcome_delivered = False
             self.metrics.inc("interviews_started")
             return {"status": "started", "interview_id": self.session.interview_id, "questions": len(plan.questions),
                     "criteria": [c.name for c in plan.criteria],
-                    "note": "ask one question at a time with interview_next_question; do not reveal scores to the candidate"}
+                    "note": "ask one question at a time with interview_next_question; after each answer call "
+                            "interview_record_answer with the qid only; do not reveal scores or internal fields"}
 
         return ToolDef("start_interview", {"candidate_id": str}, handler,
                        description="Begin interviewing a prepared candidate. Organizer or recruiter only.",
@@ -481,29 +721,46 @@ class WorkServices:
 
     def begin_interview(self, candidate_id: str) -> str:
         """Start the interview for a candidate prepared with the wizard. Used by `interview run`, where the person who ran the
-        command is the authorization, so the spoken role checks do not apply to the questions. Returns Tara's first-words prompt."""
+        command is the authorization, so the spoken role checks do not apply to the questions. Returns Tara's first-words prompt.
+
+        The call is idempotent while the interview is open: a reconnect or duplicate start must not reset questions, timers or
+        the welcome. The application already knows the session started here; no separate join detector is invented."""
         d = self.workspace.load_candidate(check_id(candidate_id.strip().lower()))
         prof = CandidateProfile.from_dict(d["profile"])
         plan = InterviewPlan.from_dict(d["plan"])
-        self.session = InterviewSession(plan, prof.candidate_id, lambda: tuple(self.working.turns),
-                                        candidate_speakers=self.candidate_speakers)
+        if (self.session is not None and not self.session.done
+                and self.session.candidate_id == prof.candidate_id and self.autopilot):
+            self.candidate_label = prof.label
+            return ("The interview is already in progress. Do not repeat the welcome and do not restart the questions. "
+                    "Continue from the current question; if none is open, call interview_next_question.")
+        self._cancel_question_timer()
+        self.session = self._create_interview(prof, plan)
         self.last_plan, self.last_brief, self.last_result = plan, prof.brief(), None
         self.autopilot, self.candidate_label = True, prof.label
+        self._reset_answer()
+        self._question_awaiting_playback = ""
+        self._welcome_delivered = False
         self.metrics.inc("interviews_started")
         n = len(plan.questions)
         return (f"A candidate named {prof.label} has just joined the interview for the {plan.role_title} role. Say hello, introduce "
                 f"yourself as Tara, an AI interviewer on the hiring team, and say plainly that you are an AI and that the interview "
                 f"is recorded for the hiring team. Then ask: \"You are {prof.label}, right?\" and wait for their answer. If they "
-                f"confirm, explain briefly that you will ask {n} question{'s' if n != 1 else ''}, one at a time, and that they should "
-                f"take their time; then call interview_next_question and ask the first one in your own words. If they are not "
-                f"{prof.label}, apologise, say the team will follow up, and do not continue. After every answer, call "
-                f"interview_record_answer with an exact quote, then follow up if the answer was thin or go on to the next question. "
-                f"When interview_next_question says it is done, call finish_interview, thank them, and say the team will be in "
-                f"touch. Never say a score, never say hire or reject, and never ask about age, family, religion, health or similar.")
+                f"confirm, explain briefly that you will ask {n} question{'s' if n != 1 else ''}, one at a time, with up to three "
+                f"minutes for each answer, and that they should take their time; then call interview_next_question and ask the first "
+                f"one in your own words. If they are not {prof.label}, apologise, say the team will follow up, and do not continue. "
+                f"After every answer, call interview_record_answer with the qid only. The application evaluates meaning, not exact "
+                f"wording, and returns needs_retry and should_advance. If needs_retry is true, give one short proportional hint and "
+                f"ask them to try again; never reveal the expected answer. If not, acknowledge only what they actually said and move "
+                f"on. When interview_next_question says it is done, call finish_interview, thank them, and say the team will be in "
+                f"touch. Never say a score or internal field, never say hire or reject, and never ask about age, family, religion, "
+                f"health or similar.")
 
     async def end_interview(self) -> dict[str, Any]:
         """At the end of a run: finish an interview that is still open, save the evidence and write the report. Never raises."""
         out: dict[str, Any] = {}
+        self._cancel_question_timer()
+        self._reset_answer()
+        self._question_awaiting_playback = ""
         if self.session is None:
             return out
         try:
@@ -534,28 +791,88 @@ class WorkServices:
         return self.session
 
     def _next_question_tool(self) -> ToolDef:
-        def handler() -> dict[str, Any]:
+        async def handler() -> dict[str, Any]:
             try:
-                return self._active().next_question()
+                session = self._active()
+                out = session.next_question()
+                if out.get("done"):
+                    self._question_awaiting_playback = ""
+                    return out
+                if out.get("duplicate") or out.get("evaluating"):
+                    return out                  # a repeated call must not re-arm the clock or clear a pending marker
+                self._reset_answer()
+                self._question_awaiting_playback = out["qid"]
+                self._schedule_question_timer(out["qid"])
+                return out
             except InterviewError as exc:
                 raise tool_failure("interview_error", str(exc)) from exc
 
         return ToolDef("interview_next_question", {}, handler,
-                       description="Get the next planned interview question. Ask it naturally in your own words.",
+                       description="Get the next planned interview question. Ask it naturally in your own words. Calling it again "
+                                   "while a question is open returns the same question instead of skipping ahead.",
                        timeout_s=3.0, permission="hiring_write", side_effect=True, live_write=True, category="hiring")
 
     def _record_answer_tool(self) -> ToolDef:
-        def handler(qid: str, criterion: str, score: int, quote: str, rationale: str = "") -> dict[str, Any]:
+        async def handler(qid: str, criterion: str = "", score: int = -1, quote: str = "",
+                          rationale: str = "") -> dict[str, Any]:
+            session = self._active()
+            if score >= 0 or quote.strip():
+                # Legacy compatibility path: a model-supplied score with a verified quote. New prompts call qid only.
+                try:
+                    return session.record(qid.strip(), criterion.strip(), score, rationale, quote)
+                except InterviewError as exc:
+                    raise tool_failure("interview_error", str(exc)) from exc
+            progress = session.current_question()
+            if progress is None or progress.qid != qid.strip():
+                raise tool_failure("interview_error", "that is not the current question")
+            if progress.finalized:
+                self._question_awaiting_playback = ""
+                return {"status": "already_evaluated", "qid": qid, "should_advance": True,
+                        "next_action": "finish" if session.index >= len(session.plan.questions) else "next_question",
+                        "say": "Do not evaluate again and do not repeat feedback. Ask the next question."}
+            answer = await self._wait_for_answer()
+            if not answer:
+                raise tool_failure("no_answer", "I have not heard an answer yet; keep listening and call this after the candidate "
+                                                "finishes speaking", retryable=True)
             try:
-                return self._active().record(qid.strip(), criterion.strip(), score, rationale, quote)
+                # Never invent a speaker id: if attribution was not captured, the report marks it unverified.
+                speaker = self._live_answer_speaker
+                ctx = session.begin_attempt(qid.strip(), answer, speaker=speaker)
+            except InterviewExpired as exc:
+                self.metrics.inc("interview_question_timeouts")
+                next_payload = self._advance_after_timeout(exc.decision)
+                return {**exc.decision, **({"next_question": next_payload} if next_payload is not None else {})}
             except InterviewError as exc:
                 raise tool_failure("interview_error", str(exc)) from exc
+            try:
+                evaluation = await self.evaluator.evaluate(self._plan_question(session, qid.strip()), answer,
+                                                           attempt=ctx.attempt, previous=tuple(progress.attempts))
+            except asyncio.CancelledError:
+                session.cancel_attempt(ctx.attempt_id)
+                raise
+            except Exception:  # noqa: BLE001 - evaluator already falls back; this is the last safety net
+                session.cancel_attempt(ctx.attempt_id)
+                self.metrics.inc("interview_eval_unexpected_failures")
+                raise tool_failure("evaluation_failed", "The answer could not be evaluated; keep the interview moving and ask "
+                                                        "the next question", retryable=True) from None
+            decision = session.finish_attempt(ctx.attempt_id, evaluation)
+            if decision.get("needs_retry"):
+                self._reset_answer()          # the retry needs a new answer, not the first one replayed
+                self._question_awaiting_playback = ""   # a retry prompt never re-arms the question clock
+            elif decision.get("should_advance"):
+                self._cancel_question_timer()
+                self._reset_answer()
+                self._question_awaiting_playback = ""
+            return decision
 
-        return ToolDef("interview_record_answer", {"qid": str, "criterion": str, "score": int, "quote": str}, handler,
-                       optional={"rationale": str},
-                       description="Record your assessment of the candidate's answer: one criterion, a score 0-4 and an EXACT quote of the "
-                                   "candidate's words from the conversation. Rejected if the quote is not found. Do not say the score aloud.",
-                       timeout_s=3.0, permission="hiring_write", side_effect=True, live_write=True, category="hiring")
+        return ToolDef("interview_record_answer", {"qid": str}, handler,
+                       optional={"criterion": str, "score": int, "quote": str, "rationale": str},
+                       description="Evaluate the candidate's most recent answer for this question. Call with the qid only. The "
+                                   "application judges meaning, technical accuracy, completeness, reasoning and valid alternatives, "
+                                   "then returns feedback, needs_retry and should_advance. Never read scores or internal fields aloud. "
+                                   "The optional score and quote arguments exist only for the legacy path.",
+                       timeout_s=self.settings.interview_eval_timeout_s + 8,
+                       permission="hiring_write", side_effect=True, live_write=True, category="hiring")
 
     def _finish_interview_tool(self) -> ToolDef:
         def handler() -> dict[str, Any]:
@@ -564,6 +881,13 @@ class WorkServices:
             session = self._active()
             if self.autopilot and session.index < len(session.plan.questions):
                 raise tool_failure("not_finished_yet", "There are planned questions left; ask them before finishing")
+            current = session.current_question()
+            if current is not None and not current.finalized and session.state is InterviewState.EVALUATING_ANSWER:
+                raise tool_failure("not_finished_yet", "An answer is still being evaluated; wait for that result or let the "
+                                                       "three-minute limit expire before finishing")
+            self._cancel_question_timer()
+            self._reset_answer()
+            self._question_awaiting_playback = ""
             result = session.finish()
             self.last_result = result
             self.workspace.save_interview(session.interview_id, {"result": result.to_dict(), "plan": session.plan.to_dict(),
@@ -619,6 +943,8 @@ class WorkServices:
         return out
 
     async def close(self) -> None:
+        self._cancel_question_timer()
+        self._question_awaiting_playback = ""
         if self._clock_task is not None:
             self._clock_task.cancel()
         await self.jobs.close()

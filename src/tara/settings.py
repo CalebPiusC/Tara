@@ -156,6 +156,24 @@ class WorkSettings:
     episode_retention_days: int = 90         # stored transcript chunks are deleted after this
     fact_retention_days: int = 180           # unconfirmed extracted facts expire after this
     recall_nudges: bool = True               # quiet "we confirmed this earlier" notes to the model (never spoken unprompted)
+    interview_question_limit_s: float = 180.0  # hard limit per question, including retries; monotonic timer in code
+    interview_retry_limit: int = 1             # one retry after an incorrect or unclear first answer
+    interview_eval_timeout_s: float = 20.0     # semantic evaluation must answer within this; fallback scoring otherwise
+    interview_answer_grace_s: float = 2.0      # wait this long for delayed transcription before saying no answer was heard
+
+
+@dataclass(frozen=True)
+class MeetSettings:
+    """The Google Meet browser bot (docs/GOOGLE_MEET_BOT.md). No credentials live here: the bot signs in once by hand into the profile."""
+
+    profile_dir: str = "./work/meet/profile"   # the bot's own Chrome profile (its Google sign-in lives only here)
+    lock_dir: str = "./work/meet/locks"         # one lock file per meeting so two workers never join the same one
+    bot_name: str = "Tara"                      # the name shown in the meeting (guest join) and ignored in the people list
+    channel: str = "chrome"                     # the installed browser Playwright drives; no browser is downloaded
+    headless: bool = False                      # first real tests should be visible
+    admit_timeout_s: float = 600.0              # how long to wait in the waiting room for a person to admit the bot
+    join_timeout_s: float = 60.0
+    reconnects: int = 3
 
 
 @dataclass(frozen=True)
@@ -226,6 +244,7 @@ class RuntimeSettings:
     memory: MemorySettings = field(default_factory=MemorySettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
     work: WorkSettings = field(default_factory=WorkSettings)
+    meet: MeetSettings = field(default_factory=MeetSettings)
     persona: PersonaSettings = field(default_factory=PersonaSettings)
     behavior: BehaviorSettings = field(default_factory=BehaviorSettings)
 
@@ -288,6 +307,13 @@ class RuntimeSettings:
                 write_timeout_s=_num(e, "TARA_MEMORY_WRITE_TIMEOUT_S", MemorySettings.write_timeout_s),
                 recall_timeout_s=_num(e, "TARA_MEMORY_RECALL_TIMEOUT_S", MemorySettings.recall_timeout_s),
                 schema=e.get("TARA_MEMORY_SCHEMA", "")),
+            meet=MeetSettings(
+                profile_dir=e.get("TARA_MEET_PROFILE_DIR", MeetSettings.profile_dir), lock_dir=e.get("TARA_MEET_LOCK_DIR", MeetSettings.lock_dir),
+                bot_name=(e.get("TARA_MEET_BOT_NAME", "Tara").strip() or "Tara")[:60], channel=e.get("TARA_MEET_CHANNEL", "chrome").strip(),
+                headless=_bool(e.get("TARA_MEET_HEADLESS"), False),
+                admit_timeout_s=_num(e, "TARA_MEET_ADMIT_TIMEOUT_S", MeetSettings.admit_timeout_s),
+                join_timeout_s=_num(e, "TARA_MEET_JOIN_TIMEOUT_S", MeetSettings.join_timeout_s),
+                reconnects=_num(e, "TARA_MEET_RECONNECTS", MeetSettings.reconnects, int)),
             work=WorkSettings(
                 enabled=_bool(e.get("TARA_WORK_ENABLED"), False), dir=e.get("TARA_WORK_DIR", "./work"),
                 auto_memory=e.get("TARA_AUTO_MEMORY", "candidate").strip().lower(),
@@ -313,7 +339,14 @@ class RuntimeSettings:
                 chunk_turns=_num(e, "TARA_CHUNK_TURNS", WorkSettings.chunk_turns, int),
                 episode_retention_days=_num(e, "TARA_EPISODE_RETENTION_DAYS", WorkSettings.episode_retention_days, int),
                 fact_retention_days=_num(e, "TARA_FACT_RETENTION_DAYS", WorkSettings.fact_retention_days, int),
-                recall_nudges=_bool(e.get("TARA_RECALL_NUDGES"), True)),
+                recall_nudges=_bool(e.get("TARA_RECALL_NUDGES"), True),
+                interview_question_limit_s=_num(e, "TARA_INTERVIEW_QUESTION_LIMIT_S",
+                                                WorkSettings.interview_question_limit_s),
+                interview_retry_limit=_num(e, "TARA_INTERVIEW_RETRY_LIMIT", WorkSettings.interview_retry_limit, int),
+                interview_eval_timeout_s=_num(e, "TARA_INTERVIEW_EVAL_TIMEOUT_S",
+                                               WorkSettings.interview_eval_timeout_s),
+                interview_answer_grace_s=_num(e, "TARA_INTERVIEW_ANSWER_GRACE_S",
+                                               WorkSettings.interview_answer_grace_s)),
             tools=ToolSettings(
                 enabled=_bool(e.get("TARA_TOOLS_ENABLED"), True),
                 time=_bool(e.get("TARA_TOOLS_TIME"), True),
@@ -414,6 +447,13 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
             err("TARA_LIVE_*", "hold_ms >= 0 and queue sizes >= 1")
         if not lv.context_compression and lv.session_resumption is False:
             warn("TARA_LIVE_COMPRESSION", "without compression audio-only sessions end after about 15 minutes (docs)")
+    mt = s.meet
+    if not mt.profile_dir.strip() or not mt.lock_dir.strip():
+        err("TARA_MEET_PROFILE_DIR", "profile and lock folders must not be empty")
+    if not 5 <= mt.join_timeout_s <= 300 or not 10 <= mt.admit_timeout_s <= 3600:
+        err("TARA_MEET_ADMIT_TIMEOUT_S", "join timeout must be 5 to 300 s and admit timeout 10 to 3600 s")
+    if not 0 <= mt.reconnects <= 10:
+        err("TARA_MEET_RECONNECTS", "must be between 0 and 10")
     wk = s.work
     if wk.enabled:
         if wk.auto_memory not in ("off", "candidate"):
@@ -443,6 +483,14 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
             err("TARA_EPISODE_RETENTION_DAYS", "retention must be between 1 and 3650 days")
         if not 1 <= wk.max_jobs <= 8:
             err("TARA_MAX_JOBS", "must be between 1 and 8")
+        if not 10 <= wk.interview_question_limit_s <= 600:
+            err("TARA_INTERVIEW_QUESTION_LIMIT_S", "must be between 10 and 600 seconds")
+        if not 0 <= wk.interview_retry_limit <= 2:
+            err("TARA_INTERVIEW_RETRY_LIMIT", "must be between 0 and 2")
+        if not 1 <= wk.interview_eval_timeout_s <= 60:
+            err("TARA_INTERVIEW_EVAL_TIMEOUT_S", "must be between 1 and 60 seconds")
+        if not 0 <= wk.interview_answer_grace_s <= 10:
+            err("TARA_INTERVIEW_ANSWER_GRACE_S", "must be between 0 and 10 seconds")
         if (wk.documents or wk.hiring) and not g.model:
             warn("TARA_LLM_MODEL", "no text model id set: documents and interview plans fall back to plain templates")
         if (wk.documents or wk.hiring) and g.model and not g.api_key:

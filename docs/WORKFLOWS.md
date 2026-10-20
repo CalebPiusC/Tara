@@ -5,7 +5,7 @@ Status: **implemented and tested offline with fakes**. Not verified: real Gemini
 ## What it does
 - **Memory tiers.** Each turn is ephemeral, session (meeting notes) or a long-term candidate. Automatic long-term saves are candidates with an expiry (`TARA_AUTO_MEMORY_TTL_DAYS`) and become confirmed only after repeat sightings or an explicit confirmation. Sensitive text and personal facts from unknown speakers are skipped.
 - **Secretary.** `recall_meeting` and `meeting_recap` answer "what did we say about X". A quiet note can remind the model that something was already confirmed.
-- **Interviews.** Prepare a candidate from a CV in `work/inbox`, a GitHub handle or profile URL, and a portfolio link. Questions follow the role and required skills. Each score must quote the candidate verbatim. Output is a graded report that always requires human review. Tara never says hire or reject.
+- **Interviews.** Prepare a candidate from a CV in `work/inbox`, a GitHub handle or profile URL, and a portfolio link. Questions follow the role and required skills. Answers are judged semantically against the question, not against an exact reference wording; valid alternatives can earn credit, an incorrect or unclear first answer gets one retry, and each question has a code-owned three-minute limit that starts after the question playback finishes (with a tool-return fallback). Output is a graded report that preserves every attempt, flags timeouts, and always requires human review. The legacy exact-quote scoring path remains for compatibility. Tara never says hire or reject.
 - **Documents.** Gemini Flash writes the text from stored facts only. Python renders DOCX, PDF or Markdown. Kinds: minutes, interview_report, summary, custom.
 
 ## Where to switch it on
@@ -36,4 +36,4 @@ The terminal interview wizard (`./dev.sh interview new` and `run`) is described 
 - CV, web and transcript text is untrusted data wrapped in delimiter tags.
 
 ## Limits
-Jobs live in process and vanish on restart. Quote checks see only the last 40 turns, so record an answer soon after it. Heuristics are English only. There is no email sending. DOCX output uses python-docx, not an MCP server.
+Jobs live in process and vanish on restart. The legacy quote check sees only the last 40 turns; the semantic path captures the live answer before the committed turn. The evaluator is English only and its real spoken behaviour is unverified. There is no email sending. DOCX output uses python-docx, not an MCP server.

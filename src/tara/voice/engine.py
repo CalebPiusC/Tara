@@ -179,6 +179,7 @@ class LiveVoiceEngine:
         self._rid_base = 0              # provider response ids restart per session; ours never do
         self._max_rid = 0
         self._turn_text = ""
+        self._last_input_final = ""     # duplicate final transcript events must not duplicate the answer
         self._turn_end_at: float | None = None
         self._origin_next = "participant"
         self._gate_outcomes: dict[int, str] = {}      # response id -> allowed | denied (bounded)
@@ -405,6 +406,11 @@ class LiveVoiceEngine:
             self.metrics.inc("live_input_transcripts")
             if ev.finished:
                 self.metrics.inc("live_input_transcript_finals")
+                final = ev.text.strip()
+                if final and final == self._last_input_final:
+                    self.metrics.inc("live_input_transcript_duplicates")
+                    return
+                self._last_input_final = final
             self._turn_text = (self._turn_text + " " + ev.text).strip()
             if ev.finished and self.memory_gate is not None:
                 self.memory_gate.observe(self._turn_text)
@@ -434,6 +440,9 @@ class LiveVoiceEngine:
             await self._barge_in("provider", ev.response_id)
         elif isinstance(ev, ToolCallRequested):
             for call in ev.calls:
+                if call.call_id in self._tool_tasks:
+                    self.metrics.inc("live_tool_duplicate_calls")
+                    continue
                 self._tool_tasks[call.call_id] = self._spawn(self._run_tool(call, self._session_gen), f"tool:{call.name}")
         elif isinstance(ev, ToolCallsCancelled):
             for cid in ev.call_ids:
@@ -597,6 +606,7 @@ class LiveVoiceEngine:
 
     def _commit_participant_turn(self, att: Attribution | None = None) -> None:
         text, self._turn_text = self._turn_text.strip(), ""
+        self._last_input_final = ""
         self._ctrl_done = False
         if not text:
             return
@@ -654,6 +664,7 @@ class LiveVoiceEngine:
 
     def _commit_participant_turn_reset(self) -> None:
         self._turn_text = ""      # the interrupter's speech is a NEW turn; its transcript arrives after this event
+        self._last_input_final = ""
         self._ctrl_done = False
 
     async def _cancel_output(self, reason: str) -> None:

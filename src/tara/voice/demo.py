@@ -31,7 +31,9 @@ _DEBUG_KEYS = ("live_input_transcripts", "live_input_transcript_finals", "live_r
                "live_output_transcripts", "live_turn_complete", "gate_allowed", "gate_denied",
                "live_send_errors", "live_downlink_errors", "live_disconnects", "live_reconnects",
                "audio_invalid", "live_uplink_dropped", "playback_errors", "memory_writes", "memory_recalls",
-               "memory_write_failures", "memory_recall_failures", "memory_startup_failures")
+               "memory_write_failures", "memory_recall_failures", "memory_startup_failures",
+               "interview_question_clocks_started", "interview_question_playback_incomplete",
+               "interview_question_timeouts", "interview_eval_fallbacks", "interview_eval_model")
 _DEBUG_FIELDS = ("response", "state", "reason", "origin", "source", "delivered_ms", "length", "connect_ms",
                  "time_left_s", "recoverable", "tool", "ok", "error")
 

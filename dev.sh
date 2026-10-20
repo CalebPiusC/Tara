@@ -7,6 +7,7 @@
 #   ./dev.sh --transcripts  also print what Tara heard and said (to see mishearings)
 #   ./dev.sh --type standup  meeting type: general, standup, one_on_one, retro, client_call, brainstorm
 #   ./dev.sh interview new "Name"        create an interview (GitHub, CV, questions) and get a code
+#   ./dev.sh meet check|login|join <link> --interview <code>   Tara joins a real Google Meet (see docs/GOOGLE_MEET_BOT.md)
 #   ./dev.sh interview list              prepared interviews and results
 #   ./dev.sh interview run <code>        Tara runs that interview (you play the candidate when testing)
 #   ./dev.sh --list       list sections and meetings with dates
@@ -18,6 +19,18 @@ cd "$(dirname "$0")"
 [ -x .venv/bin/python ] || { echo "Missing .venv. Run: python3.13 -m venv .venv && .venv/bin/pip install -e '.[dev,live,audio,memory,work]'"; exit 1; }
 
 set -a; source .env; set +a
+
+# google meet bot (see docs/GOOGLE_MEET_BOT.md)
+if [ "${1:-}" = "meet" ]; then
+  sub="${2:-}"; shift 2 || true
+  case "$sub" in
+    check) exec .venv/bin/python -m tara.meet.run check ;;
+    login) exec .venv/bin/python -m tara.meet.run login ;;
+    join)  link="${1:?usage: ./dev.sh meet join <meet link or code> --interview <code>}"; shift
+           exec .venv/bin/python -m tara.meet.run join "$link" "$@" ;;
+    *)     echo "usage: ./dev.sh meet check | login | join <link> --interview <code>"; exit 2 ;;
+  esac
+fi
 
 # interview commands (see docs/INTERVIEWS.md)
 if [ "${1:-}" = "interview" ]; then

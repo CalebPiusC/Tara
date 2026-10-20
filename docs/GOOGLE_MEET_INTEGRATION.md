@@ -1,6 +1,6 @@
 # Google Meet integration plan (Phase 2)
 
-**Status: designed, not built. Nothing here has run in a real Google Meet.** This page folds the remaining "bigger work" items into one plan: speaker identification (who said what), the Meet connection, the calendar roster, the dashboard, real users and teams, and meaning-based search. Everything Tara already does (memory, numbered meetings, open items, agenda, minutes, interviews, documents, spoken controls) lives in the application and is meant to carry over unchanged. The full command list with a "does it carry over" column is [COMMANDS](COMMANDS.md).
+**Status: the foundation (M0 to M2, minimal) is built and tested against a local stand-in for Meet in a real Chrome; see [GOOGLE_MEET_BOT](GOOGLE_MEET_BOT.md). Nothing has run in a real Google Meet yet.** This page folds the remaining "bigger work" items into one plan: speaker identification (who said what), the Meet connection, the calendar roster, the dashboard, real users and teams, and meaning-based search. Everything Tara already does (memory, numbered meetings, open items, agenda, minutes, interviews, documents, spoken controls) lives in the application and is meant to carry over unchanged. The full command list with a "does it carry over" column is [COMMANDS](COMMANDS.md).
 
 Background: [GOOGLE_MEET_RESEARCH](GOOGLE_MEET_RESEARCH.md) (options and their status as of 2026-10-19), [MEETING_PLATFORM_INTEGRATION](MEETING_PLATFORM_INTEGRATION.md) (adapter contract), [research/PHASE0_MEET_SPIKE](research/PHASE0_MEET_SPIKE.md).
 
@@ -41,9 +41,9 @@ Each phase ends with a measured result, not a mock. A mock adapter proves nothin
 
 | Phase | Objective | Exit criterion |
 |---|---|---|
-| M0 | Re-check the options: Meet Media API status (was Developer Preview and closed), vendor bot APIs, terms of service, consent rules | a written decision on which transport to try first, with sources and access dates in `research/SOURCES.md` |
-| M1 | Audio spike in a test meeting you host: Tara joins, hears one other person, speaks back (browser participant with virtual audio devices, or a vendor bot) | two-way audio proven; measured join time, delay and echo; the local demo's speaker half-duplex trick re-tested |
-| M2 | `MeetAdapter` behind the existing interface, with honest `AdapterCapabilities`, join, leave, reconnect, and disconnect handling | the same engine tests pass against it; a 30 minute meeting survives one network drop |
+| M0 | Re-check the options: Meet Media API status (was Developer Preview and closed), vendor bot APIs, terms of service, consent rules | **Done 2026-10-21:** Media API still Developer Preview and needs every participant enrolled, so a browser participant was chosen; sources in `research/SOURCES.md` (M4 to M6); vendor bot APIs were not evaluated |
+| M1 | Audio spike in a test meeting you host: Tara joins, hears one other person, speaks back (browser participant with virtual audio devices, or a vendor bot) | **Partly done:** two-way audio proven in a real Chrome against a local stand-in (in-page bridge, no virtual device). **Still needed:** the same in a real Meet, with join time, delay and echo measured |
+| M2 | `MeetAdapter` behind the existing interface, with honest `AdapterCapabilities`, join, leave, reconnect, and disconnect handling | **Built and tested offline and in local Chrome** (`src/tara/meet/`). **Still needed:** a real 30 minute meeting surviving one network drop |
 | M3 | Who said what (item 16) | see below |
 | M4 | Roster and calendar (item 17) | see below |
 | M5 | Platform controls: probe and expose mute, camera, picture only if they work | each control either works in a real meeting or is reported unsupported |

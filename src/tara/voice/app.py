@@ -13,7 +13,7 @@ from ..behaviour.expressions import ExpressionEmitter, ExpressionSink, NullExpre
 from ..behaviour.meeting_kind import MeetingKindTracker
 from ..behaviour.profiles import effective_profile, parse_profile
 from ..classify import IntentClassifier, RuleIntentClassifier
-from ..config import MeetingConfig, Role, ToolSpec
+from ..config import INTERVIEW_MODES, MeetingConfig, Role, ToolSpec
 from ..contracts import KnowledgeProvider, MeetingAdapter
 from ..control.commands import CommandKind
 from ..control.policy import DEFAULT_ENABLED
@@ -49,12 +49,15 @@ from .gemini_live import GeminiLiveProvider
 from .instructions import live_system_instruction
 from .memory import InMemoryMeetingMemory, MeetingMemory, Scope, WorkingMemory, record_note_tool, scoped_search
 from .participation import LiveParticipation
-from .playback import PlaybackController
+from .playback import PlaybackController, PlaybackResult
 from .registry import SessionRegistry
 
 DEFAULT_THRESHOLDS = Thresholds(min_intent_confidence=0.5, proactive_usefulness=0.7,
                                 proactive_min_pause_ms=1500, default_attribution=0.8)
 _TYPES = {str: "STRING", int: "INTEGER", float: "NUMBER", bool: "BOOLEAN"}
+# A thinking pause in an interview is not the end of an answer. This is the provider's own VAD silence window; an explicit
+# TARA_LIVE_SILENCE_MS still wins. It does not replace the application's three-minute question deadline.
+INTERVIEW_SILENCE_MS = 1200
 
 
 def tool_declarations(executor: ToolExecutor | None) -> tuple[ToolDecl, ...]:
@@ -100,7 +103,7 @@ class LiveTaraApp:
                  meeting_memory: MeetingMemory | None = None, thresholds: Thresholds = DEFAULT_THRESHOLDS,
                  expression_sink: ExpressionSink | None = None, memory_service: MemoryService | None = None,
                  user_id: str = "local-user", orchestration: Orchestration | None = None,
-                 interview_code: str = ""):
+                 interview_code: str = "", defer_opening: bool = False):
         errors = [f"{i.field}: {i.message}" for i in validate(settings) if i.severity == "error"]
         if not settings.live.enabled:
             errors.append("TARA_LIVE_ENABLED: Live voice is not enabled")
@@ -135,6 +138,8 @@ class LiveTaraApp:
         self.memory_gate = MemoryWriteGate() if self.memory_service is not None else None
         self.session_id = session_id
         self.interview_code = interview_code
+        self.defer_opening = defer_opening          # the opening waits for `say_pending_opening` (the candidate has not joined yet)
+        self._pending_opening = ""
         self.last_finalize: dict[str, Any] = {}
         self._catch_up: asyncio.Task[int] | None = None
         self._opening: asyncio.Task[None] | None = None
@@ -217,7 +222,9 @@ class LiveTaraApp:
             voice_name=lv.voice_name,
             tools=tool_declarations(tools), input_transcription=lv.input_transcription,
             output_transcription=lv.output_transcription, resumption=lv.session_resumption,
-            context_compression=lv.context_compression, silence_duration_ms=lv.silence_duration_ms or None,
+            context_compression=lv.context_compression,
+            silence_duration_ms=(lv.silence_duration_ms or INTERVIEW_SILENCE_MS) if cfg.mode in INTERVIEW_MODES
+            else (lv.silence_duration_ms or None),
             proactive_audio=lv.proactive_audio, tool_behavior=lv.tool_behavior)
         self.playback = PlaybackController(adapter, self.metrics, lv.playback_queue_chunks)
         self.engine = LiveVoiceEngine(
@@ -236,6 +243,26 @@ class LiveTaraApp:
                               reconnect_backoff_s=lv.reconnect_backoff_s, local_barge_in=lv.local_barge_in,
                               hybrid_end_of_speech=lv.hybrid_end_of_speech,
                               max_tool_calls_per_turn=settings.tools.max_calls_per_turn))
+        if self.work is not None:
+            self._observe_playback_for_interviews()
+
+    def _observe_playback_for_interviews(self) -> None:
+        """Let the interview clock start when the question audio really finishes.
+
+        The engine owns playback completion for expressions; this wraps that existing callback instead of creating a
+        second playback notification path. A failed or cancelled playback is reported too, so the interview falls back
+        to the tool-return deadline rather than starting the clock on an interrupted question.
+        """
+        engine_finished = self.playback.on_finished
+        if engine_finished is None:
+            return
+
+        def finished(result: PlaybackResult) -> None:
+            engine_finished(result)
+            if self.work is not None:
+                self.work.on_playback_finished(result.response_id, completed=result.completed, cancelled=result.cancelled)
+
+        self.playback.on_finished = finished
 
     async def start(self) -> None:
         context = ""
@@ -266,17 +293,31 @@ class LiveTaraApp:
                 text = self.work.begin_interview(self.interview_code)
             except Exception as exc:  # noqa: BLE001 - say what is wrong instead of starting a silent, empty interview
                 raise ConfigError(f"could not start the interview {self.interview_code!r}: {exc}") from exc
-            self._opening = asyncio.create_task(self._say_opening(text))
+            if self.defer_opening:
+                self._pending_opening = text
+            else:
+                self._opening = asyncio.create_task(self._say_opening(text))
         elif self.work is not None and self.meeting is not None:
             text = await self.work.opening_prompt(self.meeting)
             if text:
                 self._opening = asyncio.create_task(self._say_opening(text))
 
+    async def say_pending_opening(self) -> bool:
+        """Speak the deferred opening once (for example when the candidate joins a meeting). False if there is none."""
+        text, self._pending_opening = self._pending_opening, ""
+        if not text:
+            return False
+        await self._say_opening(text)
+        return True
+
     async def _say_opening(self, text: str) -> None:
         """Tara's unprompted first words for a continuing section. Goes through the normal gate (mute and takeover win)."""
         try:
-            await asyncio.sleep(1.0)
+            # The voice session is already open here. No artificial thinking delay: a 1 s pause made the interviewer feel
+            # unresponsive and served no protocol purpose.
             await self.engine.prompt(text)
+            if self.work is not None and self.interview_code:
+                self.work.mark_welcome_delivered()
             self.metrics.inc("opening_brief_spoken")
         except asyncio.CancelledError:
             raise

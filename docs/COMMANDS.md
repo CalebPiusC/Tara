@@ -75,7 +75,7 @@ Unprompted, Tara also: greets a continuing section with what was left open (open
 | "Prepare Alex from the inbox, GitHub alexkim" | `prepare_candidate` |
 | "Who have we prepared?" / "tell me about Alex" | `list_candidates`, `get_candidate` |
 | "Start the interview with Alex" | `start_interview`, then `interview_next_question` |
-| (she scores each answer with an exact quote) | `interview_record_answer` |
+| (she evaluates each answer by meaning, with one retry and a three-minute limit) | `interview_record_answer` (qid only; the legacy score+quote path is still accepted) |
 | "Finish the interview" | `finish_interview` (decision support only, never hire or reject) |
 | "Make a PDF report of the interview" | `create_document` (kind `interview_report`) |
 
@@ -103,6 +103,14 @@ The same options exist on `python -m tara.voice.demo`: `--profile professional|c
 ```
 Details: [INTERVIEWS](INTERVIEWS.md).
 
+### Google Meet bot
+```bash
+./dev.sh meet check                                   # what is set up (no browser opened)
+./dev.sh meet login                                   # open Chrome with the bot's profile so you sign the BOT's account in
+./dev.sh meet join <link or code> --interview <code>  # Tara joins as the bot, waits to be admitted, greets the candidate, runs the interview
+```
+Details and the exact first-test steps: [GOOGLE_MEET_BOT](GOOGLE_MEET_BOT.md). Not yet run in a real Meet.
+
 ### Prepare, inspect, maintain
 ```bash
 python -m tara.hiring.prepare --label alex --role "Backend Engineer" --require Go --cv alex.pdf --github alexkim --questions 6
@@ -118,7 +126,7 @@ python -m tara.voice.smoke                            # one real Gemini Live tur
 ```
 
 ### Settings that matter most (full list: `env.full.example`)
-`GEMINI_API_KEY`, `TARA_LIVE_MODEL`, `TARA_LLM_MODEL`, `TARA_RECORDER_MODEL`, `TARA_WORK_ENABLED`, `TARA_MEMORY_ENABLED`, `TARA_MEMORY_DATABASE_URL`, `TARA_SECTION`, `TARA_MEETING_TYPE`, `TARA_OPENING_BRIEF`, `TARA_NUDGES`, `TARA_VOCAB_FILE`, `TARA_GITHUB_TOKEN`, `TARA_SEARCH_API_KEY`.
+`GEMINI_API_KEY`, `TARA_LIVE_MODEL`, `TARA_LLM_MODEL`, `TARA_RECORDER_MODEL`, `TARA_WORK_ENABLED`, `TARA_MEMORY_ENABLED`, `TARA_MEMORY_DATABASE_URL`, `TARA_SECTION`, `TARA_MEETING_TYPE`, `TARA_OPENING_BRIEF`, `TARA_NUDGES`, `TARA_VOCAB_FILE`, `TARA_GITHUB_TOKEN`, `TARA_SEARCH_API_KEY`, `TARA_INTERVIEW_QUESTION_LIMIT_S`, `TARA_INTERVIEW_RETRY_LIMIT`, `TARA_INTERVIEW_EVAL_TIMEOUT_S`, `TARA_INTERVIEW_ANSWER_GRACE_S`.
 
 ---
 
@@ -127,7 +135,7 @@ These belong to the Google Meet connection and the dashboard. They are listed so
 
 | Command | Where | Purpose |
 |---|---|---|
-| `./dev.sh --meet <meeting url or code>` | terminal | join a real Google Meet instead of the local microphone |
+| `./dev.sh --meet <meeting url or code>` | terminal | (superseded by `./dev.sh meet join`, built, not yet run in a real Meet) |
 | `./dev.sh interview new` (Meet step) | terminal | the code it prints becomes a Google Meet link with Tara already waiting inside |
 | `./dev.sh --calendar` | terminal | list today's meetings from the calendar and start Tara in one |
 | "Tara, who is in the meeting?" | voice | list attendees with names from the roster |

@@ -282,6 +282,12 @@ Without `--one-on-one`, say "Tara, ..." to get her attention.
 ```
 Reports are written to `work/documents`. See [INTERVIEWS](docs/INTERVIEWS.md).
 
+To run the same interview in a Google Meet with a dedicated bot account (needs the bot account, see [GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)):
+```bash
+./dev.sh meet login                                  # sign the bot's Google account in, once
+./dev.sh meet join https://meet.google.com/abc-defg-hij --interview feremi
+```
+
 **6. Run the tests**
 ```bash
 .venv/bin/python -m pytest -q
@@ -322,7 +328,7 @@ Tara:  You agreed to send the offer decision by Friday.
 ---
 
 ## What is next
-Google Meet connection, real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
+The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
 
 ---
 

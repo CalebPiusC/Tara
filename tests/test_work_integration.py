@@ -25,6 +25,7 @@ from tara.voice.events import InputTranscript, ToolCallRequested, ToolRequest, T
 from tara.voice.fakes import FakeVoiceProvider, FakeVoiceSession
 from tara.voice.memory import InMemoryMeetingMemory, Scope, WorkingMemory
 from tara.voice.participation import LiveParticipation
+from tara.voice.playback import PlaybackResult
 from tara.voice.registry import SessionRegistry
 from tara.workflows import WorkServices
 
@@ -376,6 +377,22 @@ def test_app_registers_work_tools_and_instructions_only_when_enabled(tmp_path):
     nomodel, _, _ = make_app(tmp_path, {"TARA_WORK_ENABLED": "1", "TARA_LLM_MODEL": "", "TARA_WORK_DIR": str(tmp_path / "w2")})
     assert "templates only" in nomodel.health()["work"]["text_model"]
     run(nomodel.close())
+
+
+@aio
+async def test_app_forwards_playback_completion_to_the_interview_clock(tmp_path):
+    app, _, _ = make_app(tmp_path, {"TARA_WORK_ENABLED": "1", "TARA_WORK_DIR": str(tmp_path / "w")})
+    assert app.work is not None
+    calls: list[tuple[int, bool, bool]] = []
+
+    def observe(response_id: int, *, completed: bool, cancelled: bool) -> None:
+        calls.append((response_id, completed, cancelled))
+
+    app.work.on_playback_finished = observe
+    app.playback.on_finished(PlaybackResult(7, 100, True, False))
+    app.playback.on_finished(PlaybackResult(8, 20, False, True))
+    assert calls == [(7, True, False), (8, False, True)]
+    await app.close()
 
 
 @aio

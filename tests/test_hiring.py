@@ -307,7 +307,7 @@ def test_quote_matching_ignores_case_and_punctuation_but_not_words():
 
 def test_results_report_missing_evidence_honestly_and_never_recommend():
     s = session(speakers=frozenset({"Alex"}))
-    s.next_question(); s.next_question()
+    s.next_question(); s.next_question(force=True)
     s.record("q1", "Go", 3, "good", "idempotency key stored with a unique constraint")
     s.record("q1", "Go", 4, "great", "unique constraint in the database")
     r = s.finish()
@@ -333,7 +333,7 @@ def test_partial_interviews_are_flagged_and_questions_run_out_cleanly():
     r = s.finish()
     assert any("only 1 of 2 planned questions" in f for f in r.flags)
     s2 = session()
-    s2.next_question(); s2.next_question()
+    s2.next_question(); s2.next_question(force=True); s2.next_question(force=True)
     assert s2.next_question()["done"] is True
     with pytest.raises(InterviewError):
         InterviewSession(InterviewPlan("r", [], []), "x", Talk())

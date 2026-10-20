@@ -121,6 +121,7 @@ async def test_autopilot_interview_runs_without_a_spoken_role_and_finishes_only_
     assert not early.ok and early.error == "not_finished_yet" and "questions left" in early.details["reason"]
     q2 = (await acall(ex, "interview_next_question")).output
     assert q2["qid"] == "q2"
+    work.session.skip_current()                                         # operator/test skip; the model cannot do this
     assert (await acall(ex, "interview_next_question")).output["done"] is True
     fin = await acall(ex, "finish_interview")
     assert fin.ok and fin.output["human_review_required"] is True
