@@ -1,6 +1,6 @@
 # Context Assembly for Gemini
 
-**Status: Designed. Not implemented.** Today `conversation.py` builds a fixed prompt from the last 20 transcript lines plus up to 3 keyword-retrieved passages; that is the Phase 1 stand-in. Parent: [MEMORY_AND_RAG](MEMORY_AND_RAG.md).
+**Status: Designed; not the Live path yet.** The full per-turn assembler below is used only by the dormant cascaded `ConversationEngine`. v1 memory adds a separate bounded startup block (`MemoryService.startup_context`, character-capped, deduplicated, labeled untrusted) and read-only recall tool results. There is no per-turn live context assembly and no token counter for the Live provider. Parent: [MEMORY_AND_RAG](MEMORY_AND_RAG.md).
 
 ## Principle
 More context is not better. Send the smallest context that is **relevant, authoritative, recent and permitted**. The whole knowledge base and the whole transcript are never sent.

@@ -9,6 +9,7 @@ dependencies = []
 dev = ["pytest>=8", "ruff", "mypy"]
 live = ["google-genai>=2"]   # Gemini Live SDK (an API client, not a model download)
 audio = ["sounddevice>=0.5"] # local mic/speaker demo; optional, no model download
+memory = ["psycopg[binary,pool]>=3.2"]  # PostgreSQL persistence; no vector DB or embedding model
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -17,12 +18,16 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tara = ["memory/migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
   "offline: no network, no models (default)",
   "live_api: real Gemini Live API call; opt-in only (TARA_LIVE_TEST=1 plus key and model id)",
+  "db: real PostgreSQL integration; opt-in only (TARA_TEST_DATABASE_URL)",
 ]
 addopts = "-m 'not live_api'"
 

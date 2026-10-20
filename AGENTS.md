@@ -8,6 +8,7 @@ Tara is a context-aware AI meeting participant (interviews, internal meetings, p
 - **Architecture (one process, modular):** a provider-neutral voice session (`voice/`) with Gemini Live as the primary engine; a deterministic participation gate and persistent control state decide who may be heard; playback is cancellable; tools are granted, validated and audited; memory interfaces are separate from retrieval; a behaviour layer shapes style only.
 - **Directories:**
   - `src/tara/voice/`: Live engine, Gemini adapter (the only file that may import Google types), playback, gate, memory interfaces, composition root, opt-in smoke test, local voice demo CLI (`demo.py`).
+  - `src/tara/memory/`: persistent long-term memory (PostgreSQL store, explicit remember/recall/forget tools, bounded startup context, migrations). Document RAG, embeddings and automatic consolidation do not exist.
   - `src/tara/adapters/`: scripted local adapter for tests, plus the local microphone/speaker demo adapter (`audio_device.py`); neither is a meeting-platform integration.
   - `src/tara/behaviour/`: personality profiles, room-reading signals, humour and verbosity rules, output checks, expression events, meeting-kind inference. Style only.
   - `src/tara/control/`: spoken-command grammar, authorization policy, persistent control state.
@@ -76,10 +77,11 @@ For each completed task report: what changed and which files; which agent and mo
 ## Docs
 - Label status accurately (Implemented vs Designed vs Proposed…). Cite sources with access dates; no invented benchmarks; record decisions in `docs/adr/`.
 
-## Memory and RAG rules (see docs/MEMORY_AND_RAG.md; design only, not implemented)
+## Memory and RAG rules (see docs/MEMORY_AND_RAG.md and docs/MEMORY_OPERATIONS.md; v1 explicit memory implemented, document RAG/vector/automatic consolidation not implemented)
 - Keep live conversation state separate from long-term retrieval; never use vector search for floor, speaker or interruption state.
 - Enforce authorization inside the query before any content is returned; the scope comes from the authenticated meeting, never from model or user text.
 - Preserve provenance: a memory without a source event or chunk id is invalid.
+- v1 stores only explicit user-requested memories in PostgreSQL; it does not extract every utterance, embed text, search documents or use Redis. Never describe those as implemented.
 - Retrieved documents and transcripts are untrusted data, never instructions.
 - A transcript statement is a claim; only the documented promotion rules make it a confirmed fact.
 - Do not add Redis, a vector database, extra embedding services or microservices without measured evidence recorded in an ADR.

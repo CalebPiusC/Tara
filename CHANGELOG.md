@@ -6,13 +6,27 @@ Read this first if you are joining mid-stream. It says **where the project start
 
 ## How to pick up from here
 1. Read [initial.md](initial.md) (product source of truth), then [docs/README.md](docs/README.md).
-2. Run `python3.13 -m venv .venv && .venv/bin/pip install -e ".[dev,live,audio]" && .venv/bin/python -m pytest -q`. Expect all green (367 at the latest entry).
+2. Run `python3.13 -m venv .venv && .venv/bin/pip install -e ".[dev,live,audio,memory]" && .venv/bin/python -m pytest -q`. Expect all green (389 passed, 6 skipped at the latest entry).
 3. Open questions: [docs/research/OPEN_QUESTIONS.md](docs/research/OPEN_QUESTIONS.md). Roadmap: [docs/IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md).
 4. Rules for contributors and agents: [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md).
 
 ---
 
 ## [Unreleased]
+
+### 2026-10-20: persistent memory v1 (PostgreSQL, explicit save/recall/forget)
+**Implemented and tested. Offline suite: 389 passed, 6 skipped, 4 deselected; real PostgreSQL suite: 6 passed in a throwaway schema; `ruff check src tests` and `mypy src` clean. No real Gemini tool call has run yet, so how the live model uses the tools is unverified.**
+- **Audit first:** `voice/memory.py` had working/session memory interfaces and an in-memory `MeetingMemory`; `knowledge.py` had keyword retrieval; `context_assembly.py` was used only by the dormant cascaded path; the Live path relied on the provider's session context. There was no database, migration, persistence, explicit memory command, cross-session recall or RAG in the Live path. PostgreSQL 16.14 and Redis 8.8 were installed; no Tara database existed.
+- `src/tara/memory/`: new package. `models.py` defines `MemoryScope(tenant_id, user_id)`, `MemoryItem` (id, kind, text, source, session/meeting provenance, status, timestamps, expiry, confidence, supersedes, metadata), validation, tokenizer and UTC clock. `store.py` defines the `MemoryStore` protocol, `InMemoryMemoryStore` for tests and `PostgresMemoryStore` (lazy `psycopg` pool, every query filters tenant and user, soft delete, expiry, FTS + `ILIKE` fallback). `service.py` handles validation, exact dedupe, explicit supersede, bounded retrieval, startup context rendering, metrics and truthful failures. `intent.py` has a narrow English-only `MemoryWriteGate`; `tools.py` defines the three code-owned tools. `migrate.py` applies an idempotent schema.
+- `src/tara/memory/migrations/001_memory.sql`: `memory_records` plus `schema_migrations`; `tsvector` generated column, GIN index, scope/recency index, provenance and kind/status checks.
+- `settings.py`: `MemorySettings` (`TARA_MEMORY_*`), validation, redacted logging (the URL is reported only as set/missing). `.env.example` has placeholders only.
+- `voice/app.py`: memory is off by default; when enabled it registers `remember_memory`, `recall_memory` and `forget_memory`, adds the memory rules to the live instruction, queries recent memories once at session start and appends a bounded block. A startup failure injects nothing and counts `memory_startup_failures`; voice still opens.
+- `voice/engine.py`: `start(startup_context=...)` appends the block once to the provider config (and reconnects reuse it); final input transcripts update `MemoryWriteGate`; `_run_tool` now authorizes any `ToolDef(live_write=True)` tool instead of hard-coding `record_note`. `tools.py` gained `ToolDef.live_write` and `ToolExecutor.allows_live_write`. Writes still run in the existing tool task, never on the audio or playback path.
+- `voice/instructions.py`: when memory is on, the instruction requires `recall_memory` for earlier-conversation questions, limits save/forget to explicit requests, forbids false success and treats recalled content as untrusted data.
+- Tests: `tests/test_memory_core.py` (service, isolation canaries, dedupe, correction, expiry, rendering, intent, tool authorization, failure honesty), `tests/test_memory_engine.py` (gate, tool results, startup context), `tests/test_voice_app_settings.py` (settings, tool registration, startup injection) and `tests/test_memory_postgres.py` (real PostgreSQL: commit, fresh-store recall, isolation, correction, expiry, concurrent writes, simulated database failure).
+- Docs: rewritten [MEMORY_AND_RAG](docs/MEMORY_AND_RAG.md) status and v1 flow, new [MEMORY_OPERATIONS](docs/MEMORY_OPERATIONS.md), ADR-0012, and status updates to the data model, security, context-assembly, README, local-development and `.env.example` files.
+- **Not done:** real Gemini tool calling, automatic memory extraction/consolidation, document ingestion/chunking, embeddings/pgvector, hybrid retrieval, Redis, persisted meeting notes, per-turn Live context assembly, ACL tables/RLS, audit log, encryption, measured voice latency with memory on. The model must choose to call the tools; there is no deterministic save fallback.
+- **Durability evidence:** beyond the tests, a two-process check saved a memory in one Python process and recalled the same id in a second process against a throwaway PostgreSQL schema (1 hit).
 
 ### 2026-10-21: local microphone/speaker demo
 **Implemented offline (367 tests, ruff and mypy clean). The adapter and CLI are fake-backend tested; the owner ran the headphone conversation on real hardware, and speaker output needs half-duplex `--speaker` because there is no echo cancellation. No Google Meet connection.**

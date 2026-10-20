@@ -1,6 +1,76 @@
 # Memory and RAG Architecture
 
-**Status: Designed. Implemented today: only the in-memory keyword `KnowledgeProvider` (`src/tara/knowledge.py`), the live runtime (`runtime.py`) and transcript window (`engine.py`). No database, embeddings, summaries or consolidation exist.** Research: [research/RAG_TECHNOLOGY_EVALUATION.md](research/RAG_TECHNOLOGY_EVALUATION.md). Related: [CONTEXT_ASSEMBLY](CONTEXT_ASSEMBLY.md), [MEMORY_DATA_MODEL](MEMORY_DATA_MODEL.md), [MEMORY_AND_RETRIEVAL_SECURITY](MEMORY_AND_RETRIEVAL_SECURITY.md), [RAG_AND_MEMORY_EVALUATION](RAG_AND_MEMORY_EVALUATION.md).
+**Status: Partially implemented (2026-10-20). Built: PostgreSQL long-term memory (`src/tara/memory/`), explicit `remember_memory` / `recall_memory` / `forget_memory` tools, bounded startup context, PostgreSQL full-text search, tenant+user isolation, migrations, offline tests and opt-in real-Postgres tests. Not built: embeddings/pgvector, hybrid retrieval, automatic consolidation, Redis, document RAG, per-turn live context assembly, ACL tables/RLS, persisted session summaries. Real Gemini tool-calling behaviour has not been verified.** Research: [research/RAG_TECHNOLOGY_EVALUATION.md](research/RAG_TECHNOLOGY_EVALUATION.md). Related: [CONTEXT_ASSEMBLY](CONTEXT_ASSEMBLY.md), [MEMORY_DATA_MODEL](MEMORY_DATA_MODEL.md), [MEMORY_AND_RETRIEVAL_SECURITY](MEMORY_AND_RETRIEVAL_SECURITY.md), [RAG_AND_MEMORY_EVALUATION](RAG_AND_MEMORY_EVALUATION.md), [MEMORY_OPERATIONS](MEMORY_OPERATIONS.md).
+
+## What is real today (v1)
+| Capability | Implementation | Verified by |
+|---|---|---|
+| Durable memory records | `PostgresMemoryStore`, `migrations/001_memory.sql` | opt-in real-Postgres tests (`tests/test_memory_postgres.py`) |
+| Ownership / isolation | every query filters `tenant_id` **and** `user_id`; scope is built by the app | canary tests for another user and another tenant |
+| Explicit save | `remember_memory` tool; handler requires `MemoryWriteGate` set from the participant's final transcript | offline engine/tool tests |
+| Cross-session recall | `recall_memory` tool + startup memory block | shared-store test and fresh-store Postgres test |
+| Corrections | explicit `supersedes_id`; old row becomes `superseded`, provenance retained | offline and Postgres tests |
+| Forget / expiry | soft delete (`deleted_at`) and `expires_at`; excluded from retrieval | offline and Postgres tests |
+| Deduplication | exact normalized text within the same scope updates the existing record | offline and Postgres tests |
+| Bounded context | `render_memories` caps characters, dedupes, labels data as untrusted | offline tests |
+| Failure honesty | a failed write returns a tool error; startup retrieval failure injects nothing | broken-store and simulated-database-failure tests |
+
+The Live path sends no database query per audio chunk. It performs one bounded startup query, and tool calls run on the engine's existing tool task, not on the audio or playback paths.
+
+## What is still only design
+- **Automatic memory extraction / consolidation:** no model call extracts facts after a turn; only explicit requests are stored.
+- **Document RAG:** no ingestion, chunking, document versions, embeddings or pgvector columns.
+- **Hybrid retrieval:** v1 is PostgreSQL full-text search plus an `ILIKE` fallback; no vector leg, reranker or RRF.
+- **Redis:** not used; the single-process app has no measured need for it yet.
+- **ACL tables / Row-Level Security:** v1 has tenant+user filtering in application SQL, not per-document ACLs or RLS.
+- **Persisted session memory / meeting notes:** `voice.memory.InMemoryMeetingMemory` still loses notes on exit.
+- **Real Gemini tool calling:** the tools and instruction are wired and fake-backend tested; whether the live model reliably calls them is unverified.
+
+## v1 data flow
+```mermaid
+flowchart LR
+  MIC["Participant audio"] --> LIVE["Gemini Live (provider context)"]
+  LIVE --> TR["Final input transcript"]
+  TR --> GATE{"Explicit remember / forget request?"}
+  GATE -->|yes| TOOL["remember_memory / forget_memory (code-authorized)"]
+  TOOL --> SVC["MemoryService"]
+  SVC --> PG[("PostgreSQL memory_records")]
+  Q["What did I tell you about X?"] --> REC["recall_memory (read-only)"]
+  REC --> SVC
+  PG --> SVC
+  SVC --> CTX["Bounded memory block / tool result"]
+  CTX --> LIVE
+  START["New live session"] --> CTX
+```
+
+- `MemoryWriteGate` observes the final input transcript. A normal statement never opens a write. The handler re-checks the gate; the model supplies text, never the scope.
+- `MemoryService` validates, deduplicates, and returns only after the store commits. A failed store call becomes a tool error; the instruction forbids claiming success.
+- `recall_memory` is read-only and always filtered by the application-built `MemoryScope(tenant_id, user_id)`.
+- The startup block is injected once into the provider's system instruction. It is not re-sent every turn.
+- Retrieved memories and tool results are labeled untrusted data; they cannot change participation, tools or scope.
+
+## v1 configuration and commands
+```bash
+# one-time: create a dedicated database and install the optional driver
+createdb tara_memory
+.venv/bin/python -m pip install -e '.[memory]'
+
+# migrate (safe to rerun)
+TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory .venv/bin/python -m tara.memory.migrate
+
+# run the live demo with memory
+set -a; source .env; set +a
+TARA_MEMORY_ENABLED=1 TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory \
+  .venv/bin/python -m tara.voice.demo --one-on-one --debug
+
+# offline tests
+.venv/bin/python -m pytest -q
+
+# real persistence tests (throwaway schema, dropped afterwards)
+TARA_TEST_DATABASE_URL=postgresql:///tara_memory .venv/bin/python -m pytest -m db tests/test_memory_postgres.py -q
+```
+
+
 
 ## Core rule
 **Live state is not retrieval.** Who is speaking, what was just asked, whether Tara may speak and whether she was interrupted live in process memory and are read in microseconds. Vector search never answers those. Retrieval supplies *background facts* only.
@@ -10,11 +80,11 @@
 |---|---|---|---|---|---|
 | 1 | Live conversation state | process memory (`MeetingRuntime`, transcript deque, `InterviewEngine`) | engine | participation gate, assembler | in-process |
 | 2 | Working memory | process memory, rebuilt per turn | assembler + rolling summarizer | assembler | in-process |
-| 3 | Episodic meeting memory | Postgres `conversation_events`, `memory_records` | consolidation | assembler (same meeting), later meetings if permitted | DB read, bounded |
-| 4 | Long-term knowledge | Postgres `knowledge_sources`, `document_versions`, `document_chunks` | ingestion jobs | retrieval engine | DB read, bounded |
-| 5 | Retrieval engine | code | n/a | assembler | budgeted |
-| 6 | Context assembler | code | n/a | `ConversationEngine` | in-process |
-| 7 | Memory consolidation | async job after/while meeting | n/a | writes layer 3 | off the hot path |
+| 3 | Episodic meeting memory | process memory today (`voice/memory.py`); Postgres `conversation_events`, `memory_records` proposed | engine today; consolidation later | assembler (same meeting) | in-process; DB later |
+| 4 | Long-term knowledge | Postgres `memory_records` (v1); `knowledge_sources`, `document_chunks` proposed | explicit tools today; ingestion jobs later | retrieval | DB read, bounded |
+| 5 | Retrieval engine | code: PostgreSQL FTS + `ILIKE` fallback (v1); vector/RRF proposed | n/a | assembler/tools | budgeted |
+| 6 | Context assembler | startup memory block (`MemoryService.startup_context`); full `ContextAssembler` only in the dormant cascaded path | n/a | Live session start / `ConversationEngine` | in-process |
+| 7 | Memory consolidation | async job after/while meeting; **not implemented** | n/a | writes layer 3 | off the hot path |
 | 8 | Authorization and governance | code + DB constraints | admins | every read/write | on every call |
 
 ```mermaid
@@ -45,6 +115,8 @@ flowchart LR
   RET -.-> AUD
   EPI -.-> AUD
 ```
+
+The diagram is the target architecture. v1 implements only `memory_records` plus PostgreSQL FTS and the startup block; the vector leg, document store, consolidation and audit log are not built.
 
 ## Components and contracts (Proposed)
 ```python
@@ -188,7 +260,7 @@ sequenceDiagram
 ```
 
 ## ADRs
-[0009 pgvector](adr/0009-postgres-pgvector.md) · [0010 local embeddings default](adr/0010-local-embeddings-default.md) · [0011 memory trust and promotion](adr/0011-memory-trust-and-promotion.md).
+[0009 pgvector](adr/0009-postgres-pgvector.md) · [0010 local embeddings default](adr/0010-local-embeddings-default.md) · [0011 memory trust and promotion](adr/0011-memory-trust-and-promotion.md) · [0012 memory v1: Postgres FTS](adr/0012-memory-v1-postgres-fts.md).
 
 ## Roadmap
 [IMPLEMENTATION_ROADMAP](IMPLEMENTATION_ROADMAP.md) section "Memory and RAG track" (phases R1-R5).

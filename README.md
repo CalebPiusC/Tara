@@ -4,7 +4,7 @@
 
 Tara joins your meeting, works out why it exists, tracks who is speaking, and takes part only as far as the organizer's rules and the live state of the conversation allow. It can run an interview, sit in on an engineering meeting, pitch a product from approved docs, or just listen and write the notes.
 
-> **Honest status:** Tara's voice engine is **Gemini Live**, integrated behind our own interfaces and tested with scripted fakes and the real SDK's types (**367 offline tests passing**). One real one-turn smoke test now passes against the hosted service: **1.77 s connect, 1.04 s to first audio, 24 kHz output**. The owner has run a real microphone/headphone conversation; the full live behaviour suite, real interruption/reconnect, and Google Meet are **not** tested. **No local model is downloaded or used.** See [what works today](#-what-works-today) and [GEMINI_LIVE](docs/GEMINI_LIVE.md).
+> **Honest status:** Tara's voice engine is **Gemini Live**, integrated behind our own interfaces and tested with scripted fakes and the real SDK's types (**389 offline tests passing, 6 skipped**). One real one-turn smoke test now passes against the hosted service: **1.77 s connect, 1.04 s to first audio, 24 kHz output**. The owner has run a real microphone/headphone conversation; persistent memory v1 is implemented and tested against real PostgreSQL; the full live behaviour suite, real Gemini memory-tool calls, real interruption/reconnect, and Google Meet are **not** tested. **No local model is downloaded or used.** See [what works today](#-what-works-today) and [GEMINI_LIVE](docs/GEMINI_LIVE.md).
 
 ---
 
@@ -87,8 +87,8 @@ sequenceDiagram
   R->>R: takeover_active = true (speech path closed)
 ```
 
-## 🧩 Memory and knowledge (designed, not built)
-Live conversation state stays in process and is never replaced by search. Knowledge comes from approved documents in PostgreSQL with pgvector, retrieved with keyword plus vector search, authorization applied inside the query, every fact carrying its source. Meeting memory keeps decisions and actions as *candidates* until confirmed, so a transcript line never silently becomes a fact. Design: [MEMORY_AND_RAG](docs/MEMORY_AND_RAG.md), [CONTEXT_ASSEMBLY](docs/CONTEXT_ASSEMBLY.md), [security](docs/MEMORY_AND_RETRIEVAL_SECURITY.md). Today only a keyword-overlap stand-in exists in [knowledge.py](src/tara/knowledge.py).
+## 🧩 Memory and knowledge (v1 built; document RAG not built)
+Live conversation state stays in process and is never replaced by search. v1 adds durable long-term memory in PostgreSQL: explicit `remember_memory`, `recall_memory` and `forget_memory` tools, a bounded startup memory block, full-text retrieval, required provenance and tenant/user isolation. It does **not** include embeddings/pgvector, document ingestion, automatic consolidation, Redis or persisted meeting notes; real Gemini tool calling is still unverified. Design: [MEMORY_AND_RAG](docs/MEMORY_AND_RAG.md), [operations](docs/MEMORY_OPERATIONS.md), [context assembly](docs/CONTEXT_ASSEMBLY.md), [security](docs/MEMORY_AND_RETRIEVAL_SECURITY.md). The older keyword-overlap stand-in in [knowledge.py](src/tara/knowledge.py) is still separate.
 
 ## ✅ What works today
 Most of this is verified offline against fakes and the SDK's real data types. **One real one-turn Gemini Live smoke test has run; nothing has used a real microphone or a real meeting, and live behaviour, interruption and reconnect remain unverified.**
@@ -102,7 +102,7 @@ Most of this is verified offline against fakes and the SDK's real data types. **
 | Local audio demo | [adapters/audio_device.py](src/tara/adapters/audio_device.py), [voice/demo.py](src/tara/voice/demo.py) | Default microphone at 16 kHz; output resampled to the device rate; same gate, no Meet; fake-backend tests plus an owner headphone run; `--speaker` half-duplex avoids echo feedback |
 | Participation gate | [voice/participation.py](src/tara/voice/participation.py) | Addressed or not, silent policy, mute, takeover by a trusted role, identity in interviews |
 | Conversational behaviour | [behaviour/](src/tara/behaviour/) | Profiles, room-reading signals, humour and verbosity rules, style notes, output quality checks, avatar-ready expression events, floor etiquette (waits while someone is mid-sentence) |
-| Memory interfaces | [voice/memory.py](src/tara/voice/memory.py) | Working memory, scoped meeting memory with provenance, scope-bound knowledge search |
+| Memory interfaces | [voice/memory.py](src/tara/voice/memory.py), [memory/](src/tara/memory/) | Working memory, scoped meeting memory with provenance, persistent explicit long-term memory in PostgreSQL, bounded retrieval |
 | Tools | [tools.py](src/tara/tools.py) | Granted, typed, time-limited, audited; side effects need approval |
 | Settings and metrics | [settings.py](src/tara/settings.py), [metrics.py](src/tara/metrics.py) | Validated environment config; latency and failure counters |
 | Deterministic core | [config.py](src/tara/config.py), [runtime.py](src/tara/runtime.py), [participation.py](src/tara/participation.py), others | Meeting config validation, floor state machine, identity, evidence, reports |
@@ -112,19 +112,19 @@ Most of this is verified offline against fakes and the SDK's real data types. **
 - Only one real text-in/audio-out Gemini Live smoke turn has run: audio input, playback audibility, event ordering under interruption, tool behavior and speech-to-speech latency are unverified ([smoke test](#-run-it)).
 - The local audio-device demo has not been run on real hardware yet, and there is **no Google Meet connection**. The official Meet Media API is Developer Preview and closed to new signups; the plan is a browser participant or a third-party bot API ([GOOGLE_MEET_RESEARCH](docs/GOOGLE_MEET_RESEARCH.md)).
 - Speaker identity is unknown on mixed audio.
-- No RAG or database; memory is in-memory stand-ins.
+- Memory v1 stores explicit long-term memories in PostgreSQL, but there is **no document RAG, vector search, automatic extraction or Redis**, and meeting notes are still in-memory. Real Gemini tool calling for save/recall/forget is unverified.
 - No vocal expression is verified (laughter, tone, pacing): the smoke call produced audio but nobody evaluated it, and no behaviour scenario has been run. The Live docs do not document controls for them.
 - Only one text-turn latency sample exists (connect and first audio above); there is no speech-to-speech, playback or interruption latency measurement.
 - No avatar.
 
 ## 🛠️ Stack
-Python 3.13 (3.11+ required) · `google-genai` SDK for Gemini Live (optional extra, an API client not a model) · `sounddevice` for the local mic/speaker demo (optional extra) · stdlib for the rest of the core · FastAPI and a control API are planned, not built. **No local ML models are installed.**
+Python 3.13 (3.11+ required) · `google-genai` SDK for Gemini Live (optional extra, an API client not a model) · `sounddevice` for the local mic/speaker demo (optional extra) · `psycopg` for persistent memory (optional extra) · stdlib for the rest of the core · FastAPI and a control API are planned, not built. **No local ML models are installed.**
 
 ## ▶️ Run it
 ```bash
 python3.13 -m venv .venv
-.venv/bin/pip install -e ".[dev,live,audio]"
-.venv/bin/python -m pytest -q            # 367 offline tests: no network, no key
+.venv/bin/pip install -e ".[dev,live,audio,memory]"
+.venv/bin/python -m pytest -q            # 389 offline tests, 6 skipped (opt-in DB/live); no network or key
 .venv/bin/ruff check src tests && .venv/bin/mypy src
 ```
 Real-service smoke test (opt-in; makes one real API call; prints measurements only, never the key or transcripts):
@@ -145,11 +145,21 @@ set -a; source .env; set +a              # or export the two variables above
 `--one-on-one` replies to any speech from the single participant, which is what you want for a solo voice demo. Without it, the normal meeting rule applies and you must say “Tara, …”. `--speaker` prevents the speaker echo from being sent back; it disables voice barge-in, so press `Ctrl+C` to stop. The demo replies in English and uses the default input and output devices, not Google Meet. The adapter and CLI are covered by fake-backend tests; the owner has run the headphone conversation on real hardware, and the speaker mode is the supported workaround for feedback. Add `--debug` to print non-content counters (input transcripts, gate outcomes, playback failures) when a run does not reply.
 Config template: [.env.example](.env.example) (placeholders only). More: [LOCAL_DEVELOPMENT](docs/LOCAL_DEVELOPMENT.md).
 
+Persistent memory (optional; PostgreSQL):
+```bash
+createdb tara_memory
+.venv/bin/python -m pip install -e '.[memory]'
+TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory .venv/bin/python -m tara.memory.migrate
+TARA_MEMORY_ENABLED=1 TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory \
+  .venv/bin/python -m tara.voice.demo --one-on-one --debug
+```
+Say “Remember this …” to save, “What did I tell you about …?” to recall, and “Forget that …” to delete. The model must call the tools; only fake-backend tool tests have run so far. See [MEMORY_OPERATIONS](docs/MEMORY_OPERATIONS.md).
+
 ## 🔐 Security and privacy
 AI-presence disclosure is required before a meeting starts. Raw audio is not stored by default. The Gemini key lives only on the server, is read from the environment, and is redacted from every error; audio and transcripts do go to Google, and the pricing page says free-tier data may be used to improve Google products, so use a paid tier for real interviews. Interview reports are decision support and always say human review is required. More: [SECURITY_AND_PRIVACY](docs/SECURITY_AND_PRIVACY.md).
 
 ## 🗺️ Roadmap
-A real one-turn smoke test is done, and the local audio-device demo is implemented and fake-backend tested. Next: run the demo on real hardware, run the full live behaviour suite, then the Google Meet transport spike, then interviews, pitch, speaker attribution and memory/RAG. The old plan to download local models is cancelled. Detail: [IMPLEMENTATION_ROADMAP](docs/IMPLEMENTATION_ROADMAP.md).
+A real one-turn smoke test is done, and the local audio-device demo is implemented and fake-backend tested. Memory v1 (explicit PostgreSQL memory, cross-session recall, bounded startup context) is implemented and real-Postgres tested; the next memory step is a real Gemini tool-calling check, then automatic consolidation and document RAG. After that: Google Meet transport spike, interviews, pitch and speaker attribution. The old plan to download local models is cancelled. Detail: [IMPLEMENTATION_ROADMAP](docs/IMPLEMENTATION_ROADMAP.md).
 
 ## 📖 Documentation
 Start at [docs/README.md](docs/README.md). Project history and handover notes: [CHANGELOG.md](CHANGELOG.md). Open questions: [OPEN_QUESTIONS](docs/research/OPEN_QUESTIONS.md). Sources with access dates: [SOURCES](docs/research/SOURCES.md). Product intent: [initial.md](initial.md).

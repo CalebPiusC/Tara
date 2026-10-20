@@ -1,6 +1,6 @@
 # Memory Data Model (PostgreSQL)
 
-**Status: Proposed. No migration exists.** Only entities needed for the first version are defined; the rest are deferred with reasons. Every tenant-owned table has `tenant_id` and is filtered by it in every query.
+**Status: Partially implemented (2026-10-20).** v1 ships `memory_records` and `schema_migrations` in `src/tara/memory/migrations/001_memory.sql`. The other tables below are proposed and have no migration. Every tenant-owned table is filtered by `tenant_id` (and v1 memory also by `user_id`) in every query.
 
 ## Needed in v1
 | Table | Purpose | PK | Key relations | Retention |

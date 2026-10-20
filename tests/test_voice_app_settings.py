@@ -6,6 +6,7 @@ from helpers import ROLES, cfg
 
 from tara.adapters.local import LocalMeetingAdapter
 from tara.errors import ConfigError
+from tara.memory import InMemoryMemoryStore, MemoryService
 from tara.settings import RuntimeSettings, validate
 from tara.voice.app import LiveTaraApp
 from tara.voice.events import InputTranscript, ResponseAudio, TurnComplete
@@ -66,4 +67,47 @@ def test_app_runs_a_scripted_turn_end_to_end_with_no_local_models():
         finally:
             await app.close()
         assert app.health()["status"] == "closed"
+    run(go())
+
+
+def test_memory_settings_validate_and_never_leak_the_database_url():
+    assert errs({"TARA_MEMORY_ENABLED": "1"}) >= {"TARA_MEMORY_DATABASE_URL"}
+    assert errs({**LIVE, "TARA_MEMORY_ENABLED": "1", "TARA_MEMORY_DATABASE_URL": "sqlite:///x"}) >= {
+        "TARA_MEMORY_DATABASE_URL"}
+    s = RuntimeSettings.from_env({**LIVE, "TARA_MEMORY_ENABLED": "1",
+                                  "TARA_MEMORY_DATABASE_URL": "postgresql://user:TOP-SECRET@localhost/tara"})
+    assert s.memory.enabled
+    assert "TOP-SECRET" not in repr(s) and "TOP-SECRET" not in json.dumps(s.redacted())
+    assert errs({**LIVE, "TARA_MEMORY_ENABLED": "1",
+                 "TARA_MEMORY_DATABASE_URL": "postgresql://localhost/tara"}) == set()
+
+
+def test_app_wires_memory_tools_and_injects_stored_context_at_session_start():
+    async def go():
+        service = MemoryService(InMemoryMemoryStore())
+        app, sess, _ = make(memory_service=service)
+        await service.remember(app.memory_scope, "Testflow is a computer-based testing platform.",
+                               source="s1:turn:2", session_id="s1")
+        await app.start()
+        try:
+            cfg_sent = app.provider.opened[0][0]
+            names = [t.name for t in cfg_sent.tools]
+            assert names == ["record_note", "remember_memory", "recall_memory", "forget_memory"]
+            assert "recall_memory" in cfg_sent.system_instruction
+            assert "Testflow is a computer-based testing platform" in cfg_sent.system_instruction
+            assert app.health()["memory"] == "enabled"
+        finally:
+            await app.close()
+    run(go())
+
+
+def test_memory_is_off_by_default_and_adds_no_tools():
+    async def go():
+        app, _, _ = make()
+        await app.start()
+        try:
+            assert app.health()["memory"] == "disabled"
+            assert [t.name for t in app.provider.opened[0][0].tools] == ["record_note"]
+        finally:
+            await app.close()
     run(go())

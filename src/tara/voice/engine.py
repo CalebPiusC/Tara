@@ -30,6 +30,7 @@ from ..control.commands import CommandKind, ControlCommand
 from ..control.state import ControlState
 from ..errors import FatalProviderError, ProviderError, SessionLimitExceeded  # noqa: F401
 from ..identity import ParticipantRegistry
+from ..memory.intent import MemoryWriteGate
 from ..metrics import Metrics
 from ..participation import Attribution
 from ..state import (
@@ -118,7 +119,7 @@ class LiveVoiceEngine:
                  params: LiveParams | None = None, clock: Callable[[], float] = time.monotonic,
                  participants: ParticipantRegistry | None = None, behaviour: BehaviourController | None = None,
                  expressions: ExpressionEmitter | None = None, identity_image: str = '',
-                 control: ControlState | None = None):
+                 control: ControlState | None = None, memory_gate: MemoryWriteGate | None = None):
         self.session_id, self.scope, self.cfg, self.roles, self.names = session_id, scope, cfg, roles, names
         self.provider, self.session_config, self.adapter = provider, session_config, adapter
         self.participation, self.sessions, self.tools = participation, registry, tools
@@ -136,6 +137,7 @@ class LiveVoiceEngine:
         self.epoch = 0
         self.takeover_active = False
         self.control = control or ControlState()
+        self.memory_gate = memory_gate
         self.identity_image = identity_image
         self._ctrl_done = False
         self._ctrl_text = ""            # turn text already checked for a command (duplicate finals must not re-fire)
@@ -186,9 +188,14 @@ class LiveVoiceEngine:
         return t
 
     # ---- lifecycle ----------------------------------------------------------------------
-    async def start(self, target: MeetingTarget | None = None) -> None:
+    async def start(self, target: MeetingTarget | None = None, startup_context: str = "") -> None:
         self.sessions.acquire(self.session_id)       # raises SessionLimitExceeded / DuplicateSession
         self.status = "connecting"
+        if startup_context:
+            # Retrieved memory is sent once when the session opens; it is not re-sent per turn.
+            self.session_config = dataclasses.replace(
+                self.session_config,
+                system_instruction=self.session_config.system_instruction + "\n\n" + startup_context)
         try:
             t0 = self.clock()
             await self.adapter.join(target or MeetingTarget())
@@ -380,6 +387,8 @@ class LiveVoiceEngine:
             if ev.finished:
                 self.metrics.inc("live_input_transcript_finals")
             self._turn_text = (self._turn_text + " " + ev.text).strip()
+            if ev.finished and self.memory_gate is not None:
+                self.memory_gate.observe(self._turn_text)
             self._behaviour_observe(self._turn_text, final=False)
             await self._handle_control(ev.finished)
             await self._reevaluate_pending()
@@ -925,8 +934,11 @@ class LiveVoiceEngine:
                     cid = f"live:{self.session_id}:{req.call_id}"
                     self._st(ToolQueued(cid, ToolCall(req.name, {})))
                     try:
-                        if req.name == "record_note":
-                            # The spoken notes mode is the authorization, and the handler re-checks it;
+                        if self.memory_gate is not None and self._turn_text.strip():
+                            # Input transcription can lag the tool call; use the turn text we have.
+                            self.memory_gate.observe(self._turn_text)
+                        if self.tools.allows_live_write(req.name):
+                            # The handler re-checks the explicit authorization (notes mode or memory gate);
                             # it writes, so it cannot go through execute_read_only.
                             res = await self.tools.execute(ToolCall(req.name, req.args), cid)
                         else:

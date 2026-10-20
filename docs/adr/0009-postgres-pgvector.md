@@ -1,3 +1,3 @@
 # ADR-0009: PostgreSQL with pgvector for knowledge and memory
-**Status:** Proposed
+**Status:** Proposed. v1 memory uses PostgreSQL full-text search only; see [ADR-0012](0012-memory-v1-postgres-fts.md).
 **Context:** need document chunks, metadata, ACLs, memory and vectors with strict tenant filtering. **Options:** Postgres+pgvector; dedicated vector DB; SQLite plus a vector extension; in-memory only. **Decision:** Postgres+pgvector, exact search first. **Reasons:** SQL gives transactional ACL filtering and one system to run (R1, R2 in the evaluation). **Consequences:** filtered ANN caveat; vector dimension fixed per column. **Risks:** local install friction; scale unknown. **Evidence:** docs only, no benchmark. **Validation:** phase R1 eval; revisit if latency or recall fails after tuning.

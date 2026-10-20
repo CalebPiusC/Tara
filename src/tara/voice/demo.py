@@ -28,7 +28,8 @@ from .memory import Scope
 _DEBUG_KEYS = ("live_input_transcripts", "live_input_transcript_finals", "live_response_audio_chunks",
                "live_output_transcripts", "live_turn_complete", "gate_allowed", "gate_denied",
                "live_send_errors", "live_downlink_errors", "live_disconnects", "live_reconnects",
-               "audio_invalid", "live_uplink_dropped", "playback_errors")
+               "audio_invalid", "live_uplink_dropped", "playback_errors", "memory_writes", "memory_recalls",
+               "memory_write_failures", "memory_recall_failures", "memory_startup_failures")
 _DEBUG_FIELDS = ("response", "state", "reason", "origin", "source", "delivered_ms", "length", "connect_ms",
                  "time_left_s", "recoverable")
 
@@ -86,6 +87,7 @@ def _print_summary(app: LiveTaraApp, adapter: AudioDeviceAdapter) -> None:
     print(f"adapter: input_chunks={adapter.input_chunks} input_bytes={adapter.input_bytes} "
           f"dropped={adapter.dropped_chunks} playback_failures={adapter.playback_failures} "
           f"half_duplex={adapter.half_duplex}", flush=True)
+    print(f"memory: {app.health().get('memory', 'disabled')}", flush=True)
 
 
 async def run(profile: str, debug: bool = False, one_on_one: bool = False, speaker: bool = False) -> int:
@@ -101,7 +103,7 @@ async def run(profile: str, debug: bool = False, one_on_one: bool = False, speak
     adapter = AudioDeviceAdapter(stream_id="you", half_duplex=speaker)
     app = LiveTaraApp(
         settings, cfg, {"you": Role.ORGANIZER}, {"you": "You"}, adapter,
-        session_id="local-voice-demo", scope=Scope("local", "voice-demo"), bus=bus,
+        session_id="local-voice-demo", scope=Scope("local", "voice-demo"), bus=bus, user_id="you",
     )
     debug_task: asyncio.Task | None = None
     try:

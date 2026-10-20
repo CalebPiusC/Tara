@@ -1,6 +1,6 @@
 # Gemini Live: the primary voice engine
 
-**Status: implemented against scripted fakes and the real SDK's types (367 offline tests). One real one-turn smoke test has run (2026-10-20): 1771.9 ms connect, 1039.4 ms to first audio, 80,160 bytes at 24 kHz, turn complete. That verifies connection, output audio, sample rate and text-to-first-audio latency only. A local microphone/speaker demo adapter and CLI are implemented, fake-backend tested, and the owner has run the headphone conversation on real hardware (microphone capture, gate, model audio, playback). Speaker echo, real event ordering under interruption, tool behavior, behaviour/humour and speech-to-speech latency remain unverified.** Written 2026-10-20, updated 2026-10-21. Sources and access dates: [research/SOURCES.md](research/SOURCES.md) (L1-L8).
+**Status: implemented against scripted fakes and the real SDK's types (389 offline tests, 6 skipped). One real one-turn smoke test has run (2026-10-20): 1771.9 ms connect, 1039.4 ms to first audio, 80,160 bytes at 24 kHz, turn complete. That verifies connection, output audio, sample rate and text-to-first-audio latency only. A local microphone/speaker demo adapter and CLI are implemented, fake-backend tested, and the owner has run the headphone conversation on real hardware (microphone capture, gate, model audio, playback). Persistent memory v1 (PostgreSQL explicit save/recall/forget plus a bounded startup block) is implemented and tested against real PostgreSQL, but how the live Gemini model calls those tools is unverified. Speaker echo, real event ordering under interruption, tool behavior, behaviour/humour and speech-to-speech latency remain unverified.** Written 2026-10-20, updated 2026-10-21. Sources and access dates: [research/SOURCES.md](research/SOURCES.md) (L1-L8).
 
 ## Decision
 Tara's primary real-time voice path is Gemini Live (speech in, speech out, transcription, tool calls, interruption) behind our own interfaces. **No local model is downloaded, installed or loaded.** The earlier cascaded plan (Whisper, Qwen3-0.6B, Kokoro) is demoted to optional, dormant code: the adapters and the routing runtime still exist and are tested with fakes, but nothing starts them, and `docs/PHASE2_SETUP_PLAN.md` (the download plan) was removed. Local models can return later for offline use, cost, or privacy-sensitive processing without changing the voice interfaces. See [ADR-0013](adr/0013-gemini-live-primary.md).
@@ -86,7 +86,7 @@ Before: STT, router, local LLM or Gemini text, TTS (cascaded, `engine.py`), stil
 | Tool authorization and execution | Our `ToolExecutor` |
 | Meeting transport | `MeetingAdapter` (separate; no real one yet) |
 | Speaker identity | Our attribution from per-participant streams; unknown on mixed audio |
-| Memory and retrieval | Our interfaces (`voice/memory.py`); no RAG built |
+| Memory and retrieval | `voice/memory.py` for live/working/session memory; `memory/` for explicit PostgreSQL long-term memory; no document RAG, embeddings or vector search |
 | Whisper, Qwen, Kokoro | Optional dormant adapters; **not downloaded, not started** |
 
 ## Conversational behaviour
@@ -120,7 +120,7 @@ sequenceDiagram
 Live will answer anything it hears, so delivery is gated: response audio is **held** (bounded by `hold_ms` and chunk count) until the input transcript lets `LiveParticipation` decide. Allow when addressed or invited (or proactive policy outside interviews, or Tara-initiated via `prompt()`); deny when silent policy, muted, takeover active, not addressed, or (interviews) speaker identity unreliable; takeover phrases need a trusted role and reliable identity; "be quiet" mutes. Soft denials (not addressed so far) can flip while transcript fragments arrive; timeout fails silent. Cost: added latency up to the verdict, and it depends on input transcription arriving; **ordering between transcript and audio is unverified**. Alternative for later: disable automatic VAD and send activity signals only for addressed speech (docs support manual activity signals).
 
 ## Memory interfaces (foundation only)
-Live state (`ConversationState`, per session), working memory (`WorkingMemory`, bounded, used to re-seed a fresh session after reconnect), meeting memory (`MeetingMemory` Protocol, in-memory stand-in with mandatory provenance and `Scope(tenant, meeting)` isolation), knowledge retrieval (existing `KnowledgeProvider`, exposed to the model only as a `search_knowledge` tool whose scope is bound by the app). No database, vector store or ingestion. Sessions share nothing (tested). The in-memory retrieval stand-in has no authorization and must not hold multi-tenant data.
+Live state (`ConversationState`, per session), working memory (`WorkingMemory`, bounded, used to re-seed a fresh session after reconnect), meeting memory (`MeetingMemory` Protocol, in-memory stand-in with mandatory provenance and `Scope(tenant, meeting)` isolation), explicit long-term memory (`src/tara/memory/`, PostgreSQL when `TARA_MEMORY_ENABLED=1`; tools `remember_memory`, `recall_memory`, `forget_memory` plus one bounded startup block), and the older `KnowledgeProvider` stand-in (exposed only as a `search_knowledge` tool whose scope is bound by the app). There is no document ingestion, vector store, embedding model or Redis. Sessions share no live state; long-term memory is shared only within the same tenant/user. The in-memory retrieval stand-in has no authorization and must not hold multi-tenant data.
 
 ## Tools
 Granted and registered tools are declared to the model. Calls are validated (unknown, missing or mistyped arguments refused, so a model cannot pass a scope), run as separate tasks (never on the audio paths), bounded by timeout and a concurrency limit, and answered with structured results or errors. Side-effecting tools are refused during a live turn and recorded in `approvals_needed`. Cancellation events cancel in-flight tools and no result is sent. Results from a dead session are dropped. Not verified against the service.
@@ -141,7 +141,7 @@ Connection loss, `GoAway`, send failures and stream end trigger one single-fligh
 ```bash
 python3.13 -m venv .venv
 .venv/bin/pip install -e ".[dev,live,audio]"
-.venv/bin/python -m pytest -q                      # 367 offline tests, no network, no key
+.venv/bin/python -m pytest -q                      # 389 offline tests, 6 skipped; no network, no key
 .venv/bin/ruff check src tests && .venv/bin/mypy src
 ```
 Real session smoke test (opt-in, makes a real API call, prints only measurements):
@@ -171,7 +171,7 @@ It uses the default input and output devices, keeps the normal gate, replies in 
 | Participation gate | Implemented (minimum rules), tested |
 | Tool calling | Implemented, tested with fakes; unverified live |
 | Reconnect, GoAway, resumption | Implemented, tested with fakes; unverified live |
-| Memory interfaces | Interfaces plus in-memory stand-ins; no RAG |
+| Memory interfaces | Live/working/session memory plus explicit PostgreSQL long-term memory; no document RAG |
 | Metrics | Implemented; one real smoke sample (connect and text-to-first-audio); no speech-to-speech, playback or interruption measurements |
 | Local audio-device demo | Implemented (`AudioDeviceAdapter`, `python -m tara.voice.demo`); fake-backend tested; owner ran a headphone conversation (microphone, gate, model audio, playback); speaker mode and reconnect need a real-device check |
 | Google Meet | **Not implemented** (the local demo is not Meet) |

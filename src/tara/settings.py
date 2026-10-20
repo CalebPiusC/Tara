@@ -107,6 +107,20 @@ class LiveSettings:
 
 
 @dataclass(frozen=True)
+class MemorySettings:
+    """Persistent long-term memory. PostgreSQL is the only required service in v1."""
+
+    enabled: bool = False
+    database_url: str = field(default="", repr=False)  # never shown in repr or logs
+    search_limit: int = 5
+    context_max_chars: int = 1200          # startup block cap; token estimate is chars/4
+    startup_context: bool = True           # inject recent memories when a live session opens
+    write_timeout_s: float = 3.0
+    recall_timeout_s: float = 2.0
+    schema: str = ""                       # optional; tests use a per-run schema
+
+
+@dataclass(frozen=True)
 class PersonaSettings:
     """Conversational behaviour (docs/CONVERSATIONAL_BEHAVIOUR.md). Style only: no permissions live here."""
 
@@ -134,6 +148,7 @@ class RuntimeSettings:
     limits: LimitSettings = field(default_factory=LimitSettings)
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
     live: LiveSettings = field(default_factory=LiveSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
     persona: PersonaSettings = field(default_factory=PersonaSettings)
     behavior: BehaviorSettings = field(default_factory=BehaviorSettings)
 
@@ -187,6 +202,15 @@ class RuntimeSettings:
                 hybrid_end_of_speech=_bool(e.get("TARA_LIVE_HYBRID_EOS"), False),
                 api_version=e.get("TARA_LIVE_API_VERSION", ""),
                 tool_behavior=e.get("TARA_LIVE_TOOL_BEHAVIOR", "default")),
+            memory=MemorySettings(
+                enabled=_bool(e.get("TARA_MEMORY_ENABLED"), False),
+                database_url=e.get("TARA_MEMORY_DATABASE_URL", ""),
+                search_limit=_num(e, "TARA_MEMORY_SEARCH_LIMIT", MemorySettings.search_limit, int),
+                context_max_chars=_num(e, "TARA_MEMORY_CONTEXT_CHARS", MemorySettings.context_max_chars, int),
+                startup_context=_bool(e.get("TARA_MEMORY_STARTUP_CONTEXT"), True),
+                write_timeout_s=_num(e, "TARA_MEMORY_WRITE_TIMEOUT_S", MemorySettings.write_timeout_s),
+                recall_timeout_s=_num(e, "TARA_MEMORY_RECALL_TIMEOUT_S", MemorySettings.recall_timeout_s),
+                schema=e.get("TARA_MEMORY_SCHEMA", "")),
             persona=PersonaSettings(
                 profile=e.get("TARA_PERSONA_PROFILE", "professional").strip().lower(),
                 guidance_injection=_bool(e.get("TARA_PERSONA_GUIDANCE"), True),
@@ -205,8 +229,12 @@ class RuntimeSettings:
     def redacted(self) -> dict:
         """Safe to log: no secrets."""
         g = self.gemini
+        mem = self.memory
         return {"persona": self.persona.__dict__, "live": self.live.__dict__, "models": self.models.__dict__, "inference": self.inference.__dict__, "limits": self.limits.__dict__,
                 "gemini": {"enabled": g.enabled, "model": g.model, "api_key": "set" if g.api_key else "missing"},
+                "memory": {"enabled": mem.enabled, "database_url": "set" if mem.database_url else "missing",
+                           "search_limit": mem.search_limit, "context_max_chars": mem.context_max_chars,
+                           "startup_context": mem.startup_context, "schema": mem.schema or "public"},
                 "behavior": self.behavior.__dict__}
 
 
@@ -256,6 +284,16 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
         err("TARA_PERSONA_*", "intervals must be >= 0")
     if lv.tool_behavior not in ("default", "blocking", "non_blocking"):
         err("TARA_LIVE_TOOL_BEHAVIOR", "must be default, blocking or non_blocking")
+    mem = s.memory
+    if mem.enabled:
+        if not mem.database_url:
+            err("TARA_MEMORY_DATABASE_URL", "required when TARA_MEMORY_ENABLED is on")
+        elif not mem.database_url.startswith(("postgresql://", "postgres://")):
+            err("TARA_MEMORY_DATABASE_URL", "must be a postgresql:// or postgres:// URL")
+        if mem.search_limit < 1: err("TARA_MEMORY_SEARCH_LIMIT", "must be >= 1")
+        if mem.context_max_chars < 200: err("TARA_MEMORY_CONTEXT_CHARS", "must be >= 200")
+        if mem.write_timeout_s <= 0 or mem.recall_timeout_s <= 0:
+            err("TARA_MEMORY_*_TIMEOUT_S", "must be positive")
     if lim.local_context_tokens <= 0: err("TARA_LOCAL_CONTEXT_TOKENS", "must be positive")
     if i.local_max_tokens <= 0 or i.local_max_tokens >= lim.local_context_tokens > 0:
         err("TARA_LOCAL_MAX_TOKENS", "must be positive and smaller than the local context")

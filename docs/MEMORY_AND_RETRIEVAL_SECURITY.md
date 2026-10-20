@@ -1,6 +1,6 @@
 # Memory and Retrieval Security
 
-**Status: Designed. No control below is implemented.** Complements [SECURITY_AND_PRIVACY](SECURITY_AND_PRIVACY.md). Threat references: OWASP LLM01 (R6 in the evaluation doc).
+**Status: Partially implemented (2026-10-20).** v1 enforces a `MemoryScope(tenant_id, user_id)` built by the application, filters both columns inside every SQL query, requires provenance on every record, and gates writes on an explicit participant request. Not implemented: per-document ACLs, Postgres Row-Level Security, audit log, persistent retrieval cache, encryption at rest, prompt-injection eval corpus. Do not describe v1 as multi-tenant hardened. Complements [SECURITY_AND_PRIVACY](SECURITY_AND_PRIVACY.md). Threat references: OWASP LLM01 (R6 in the evaluation doc).
 
 ## Rules
 1. **Authorization before exposure.** Scope is applied inside the query (tenant, source ACL, approved flag, current version, not deleted). Unauthorized rows are never selected, then filtered later.

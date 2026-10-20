@@ -136,7 +136,7 @@ def record_note_tool(memory: MeetingMemory, scope: Scope, active: Callable[[], b
                    optional={"owner": str, "deadline": str},
                    description="Record a candidate decision, action item, open question or summary. "
                                "Record only what was actually said; never invent details.",
-                   timeout_s=timeout_s, permission="notes_write", side_effect=True)
+                   timeout_s=timeout_s, permission="notes_write", side_effect=True, live_write=True)
 
 
 def scoped_search(knowledge: KnowledgeProvider, scope: Scope):

@@ -1,6 +1,6 @@
 # Local Development (Apple Silicon, M4 Pro / 24 GB)
 
-**Updated 2026-10-21: no local model is downloaded or needed.** Gemini Live is the voice engine ([GEMINI_LIVE](GEMINI_LIVE.md)); this machine only runs Python, the tests and the audio plumbing. The previous staged plan for downloading Whisper, Qwen and Kokoro was removed. A local microphone/speaker demo now exists, but it has not yet been run on real hardware in this repo.
+**Updated 2026-10-21: no local model is downloaded or needed.** Gemini Live is the voice engine ([GEMINI_LIVE](GEMINI_LIVE.md)); this machine only runs Python, the tests and the audio plumbing. The previous staged plan for downloading Whisper, Qwen and Kokoro was removed. A local microphone/speaker demo exists and the owner has run the headphone conversation on real hardware; speaker mode and reconnect still need a real-device check.
 
 ## Setup
 ```bash
@@ -30,3 +30,29 @@ Use **headphones** for full duplex. Without them Tara's reply is captured by the
 Google Meet transport (see [research/PHASE0_MEET_SPIKE.md](research/PHASE0_MEET_SPIKE.md)). Optional dormant local-model adapters exist in `src/tara/providers/` but nothing installs or starts them; do not download models unless the owner decides to revive that path.
 ## Common errors
 `config errors: GEMINI_API_KEY ...` means the environment is not loaded; `ProviderTimeout: live connect timed out` means network or model id; a `Fatal` provider error with code 401/403/404 means a bad key or unknown model (not retried). `audio error: could not open the microphone/speakers` means the default device is missing, busy, or does not support the requested rate (16 kHz input; output uses the device default rate, resampled from 24 kHz).
+
+## Persistent memory (optional, PostgreSQL)
+
+Memory is off by default and adds no tools when off. To enable it locally:
+
+```bash
+createdb tara_memory
+.venv/bin/python -m pip install -e '.[memory]'
+TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory .venv/bin/python -m tara.memory.migrate
+# then add to .env (placeholders in .env.example):
+# TARA_MEMORY_ENABLED=1
+# TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory
+```
+
+Run the demo normally; add `--debug` to see `memory_writes`, `memory_recalls`, `memory_write_failures` and `memory_startup_failures`. Say “Remember this …” to save, “What did I tell you about …?” to recall, and “Forget that …” to delete. The model has to call the memory tools; only fake-backend tool tests have run, so a real Gemini conversation is still required to confirm behaviour.
+
+PostgreSQL is the only required service. Redis is installed on this machine but Tara does not use it: the app is single-process, the startup query is bounded, and no measured need exists yet. Do not add it to a code path without recording the measurement in an ADR.
+
+PostgreSQL integration tests create a throwaway schema and drop it:
+
+```bash
+TARA_TEST_DATABASE_URL=postgresql:///tara_memory \
+  .venv/bin/python -m pytest -m db tests/test_memory_postgres.py -q
+```
+
+No memory text, query or database URL is printed by the demo. Full operations and failure modes: [MEMORY_OPERATIONS](MEMORY_OPERATIONS.md).

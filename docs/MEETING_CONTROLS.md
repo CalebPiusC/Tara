@@ -52,7 +52,7 @@ Notes are candidates, never confirmed facts:
 - Every record carries provenance (the tool-call sequence for the session) and is stored with `status="candidate"`. `add()` rejects a record that is already confirmed, so promotion is the only path to `confirmed`.
 - "Tara, confirm that" is a control-role command. It calls `MeetingMemory.promote_latest`, which promotes the newest candidate `decision` or `action_item` and preserves provenance. If there is no candidate, Tara says there is nothing to confirm; nothing is invented.
 - `summarise_agreed(memory, scope)` is a read function that returns confirmed records and, separately, unconfirmed candidates. There is no spoken "summarise what we have agreed" command yet: the function exists for an application or a future command, and it never fills gaps.
-- The only implementation is in-memory. No database, vector store or persistence layer exists, and notes do not survive the process.
+- The only notes implementation is in-memory. Long-term memory v1 (explicit save/recall/forget) is a separate PostgreSQL store (`src/tara/memory/`), but meeting notes still do not survive the process.
 
 ## Metrics and events
 

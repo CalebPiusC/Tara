@@ -33,6 +33,7 @@ class ToolDef:
     timeout_s: float = 10.0
     permission: str = ""           # informational label; the grant itself is the MeetingConfig tool list
     side_effect: bool = True       # conservative default
+    live_write: bool = False       # code-owned exception: handler enforces its own explicit authorization
 
 
 class ToolExecutor:
@@ -69,6 +70,11 @@ class ToolExecutor:
                             "params": {k: t.__name__ for k, t in {**d.required, **d.optional}.items()},
                             "required": sorted(d.required)})
         return out
+
+    def allows_live_write(self, name: str) -> bool:
+        """True only for a code-owned tool whose handler checks explicit authorization."""
+        d = self._reg.get(name)
+        return d is not None and d.live_write
 
     async def execute_read_only(self, call: ToolCall, call_id: str) -> ToolResult:
         d = self._reg.get(call.name)
