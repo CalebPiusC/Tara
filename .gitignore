@@ -18,7 +18,7 @@ data/
 *.egg-info/
 
 # Tara work data (CVs, candidates, interviews, generated documents)
-work/
+/work/
 
 # local database backups
 backups/
