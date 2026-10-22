@@ -85,14 +85,17 @@ Unprompted, Tara also: greets a continuing section with what was left open (open
 
 ### Start Tara
 ```bash
-./dev.sh                              # speakers, debug lines on, section "default"
-./dev.sh --headphones                 # full duplex, you can interrupt her
-./dev.sh --section join               # the next numbered meeting of section "join"
-./dev.sh --type standup               # general | standup | one_on_one | retro | client_call | brainstorm
-./dev.sh --transcripts                # also print what Tara heard and said (shows speech)
-./dev.sh --quiet                      # hide debug counters
-./dev.sh --list                       # sections and their numbered meetings with dates
+./dev.sh                              # MEETING (main way): asks which Google Meet, then joins with the standard flags
+./dev.sh <link or code> [flags]       # same without the question; flags are passed on (--record, --reply-to-all, ...)
+./dev.sh interview run <code> --meet  # an interview inside a Google Meet (asks for the link)
+./dev.sh local --headphones           # no meeting: talk to her on this computer, full duplex
+./dev.sh local --section join         # the next numbered meeting of section "join"
+./dev.sh local --type standup         # general | standup | one_on_one | retro | client_call | brainstorm
+./dev.sh local --transcripts          # also print what Tara heard and said (shows speech)
+./dev.sh local --quiet                # hide debug counters
+./dev.sh local --list                 # sections and their numbered meetings with dates
 ```
+The plain `./dev.sh` meeting command is exactly `./dev.sh meet join <link> --audio devices --half-duplex --transcripts --model-wake`.
 The same options exist on `python -m tara.voice.demo`: `--profile professional|conversational|expressive`, `--debug`, `--one-on-one`, `--speaker`, `--headphones`, `--output auto|headphones|speaker`, `--section`, `--type`, `--transcripts`, `--list-meetings`.
 
 ### Interviews
@@ -111,6 +114,12 @@ Details: [INTERVIEWS](INTERVIEWS.md).
 ./dev.sh meet join <link> --audio devices             # use two virtual audio cables (BlackHole) instead of in-page taps
 ./dev.sh meet join <link> --audio devices --half-duplex --address-only   # no echo loop on a speakerphone; she answers only to "Tara, ..."
 ./dev.sh meet join <link or code>                     # a normal meeting: Tara joins as the bot, waits to be admitted, answers when you speak
+./dev.sh meet join <link> --reply-to-all               # answer any speech (default is standby: she listens and takes notes, answers when called "Hey Tara")
+./dev.sh meet join <link> --record                    # save the meeting audio (room and Tara) as WAV files under work/meet/recordings; tell everyone first
+./dev.sh meet join <link> --model-wake                 # standby where the model decides whether it was called (experimental)
+./dev.sh meet join <link> --follow-up 8                # seconds after she answers that you can keep talking without saying her name (0 = off)
+./dev.sh meet join <link> --no-gain                    # do not lift quiet voices
+./dev.sh meet join <link> --no-camera                  # do not show Tara's picture as the camera
 ./dev.sh meet join <link> --address-only --transcripts # answer only when called by name; print what she heard and said
 ./dev.sh meet join <link or code> --interview <code>  # an interview: greets the candidate by name and runs the questions
 ```
@@ -143,6 +152,7 @@ These belong to the Google Meet connection and the dashboard. They are listed so
 | `./dev.sh --meet <meeting url or code>` | terminal | (superseded by `./dev.sh meet join`, built, not yet run in a real Meet) |
 | `./dev.sh interview new` (Meet step) | terminal | the code it prints becomes a Google Meet link with Tara already waiting inside |
 | `./dev.sh --calendar` | terminal | list today's meetings from the calendar and start Tara in one |
+| "Tara, email me the summary" | voice | planned: confirms the address, sends the minutes as a document to the owner's allow-listed email ([EMAIL_DELIVERY](EMAIL_DELIVERY.md)) |
 | "Tara, who is in the meeting?" | voice | list attendees with names from the roster |
 | "Tara, who said that?" | voice | answer from per-participant attribution, or say it is unknown |
 | `./dev.sh --dashboard` | terminal | start the backend API and the web dashboard |

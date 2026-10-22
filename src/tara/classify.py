@@ -15,7 +15,11 @@ _SILENCE = re.compile(r"\b(be quiet|stop talking|please hold off|don'?t speak|st
 _WORD = re.compile(r"[a-z']+")
 
 
-def name_hint(text: str, names: tuple[str, ...] = ("tara",), threshold: float = 0.8) -> tuple[bool, int]:
+# Speech recognition often writes her name differently over a call; these spellings all count as calling her.
+TARA_NAMES = ("tara", "tarah", "tarra", "terra", "tera", "dara")
+
+
+def name_hint(text: str, names: tuple[str, ...] = TARA_NAMES, threshold: float = 0.8) -> tuple[bool, int]:
     """Fuzzy ASR-tolerant name match. Returns (found, token_index). A HINT only."""
     toks = _WORD.findall(text.lower())
     for i, t in enumerate(toks):
@@ -32,7 +36,7 @@ class IntentClassifier(Protocol):
 class RuleIntentClassifier:
     """Offline fallback. Deliberately conservative: unsure => not addressed."""
 
-    def __init__(self, names: tuple[str, ...] = ("tara",)):
+    def __init__(self, names: tuple[str, ...] = TARA_NAMES):
         self.names = names
 
     async def classify(self, text: str, context: list[str]) -> Intent:

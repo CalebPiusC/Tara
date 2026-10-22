@@ -1,5 +1,6 @@
 [project]
 name = "tara"
+license = { text = "MIT" }
 version = "0.0.1"
 description = "Context-aware AI meeting participant (Phase 1: deterministic core)"
 requires-python = ">=3.11"

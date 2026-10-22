@@ -47,3 +47,5 @@ The original Phase 2 (download and benchmark Whisper, Qwen, Kokoro) is **cancell
 **L1 progress 2026-10-20:** one real text-turn smoke passed (numbers above); the full live behaviour suite is still not run.
 **L2 progress 2026-10-21:** the local microphone/speaker adapter and demo CLI are implemented and covered by offline fake-backend tests; no real microphone/speaker conversation has been run yet.
 Local models return only if a concrete need (offline, cost, privacy) is measured.
+
+**Planned, not built:** emailing the meeting summary as a document (by voice or automatically at the end), see [EMAIL_DELIVERY](EMAIL_DELIVERY.md). It belongs to Phase 3 (integrations).

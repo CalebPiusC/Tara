@@ -8,10 +8,12 @@ by the engine: the model never decides them.
 """
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from ..classify import IntentClassifier, name_hint
+from ..classify import TARA_NAMES, IntentClassifier, name_hint
 from ..config import INTERVIEW_MODES, MeetingConfig, Role, SpeakingPolicy
 from ..contracts import AdapterCapabilities
 from ..control.commands import CommandKind, ControlCommand, parse_command
@@ -38,11 +40,18 @@ class GateDecision:
 class LiveParticipation:
     def __init__(self, cfg: MeetingConfig, roles: dict[str, Role], classifier: IntentClassifier, th: Thresholds,
                  caps: AdapterCapabilities | None = None, identity_available: bool = False,
-                 names: tuple[str, ...] = ("tara",)):
+                 names: tuple[str, ...] = TARA_NAMES):
         self.cfg, self.roles, self.classifier, self.th = cfg, roles, classifier, th
         self.caps = caps or AdapterCapabilities()
         self.identity_available, self.names = identity_available, names
         self._intent_cache: tuple[str, Intent] | None = None
+        self.follow_up_s = 0.0                         # after she answers, this long counts as "still talking to her" (0 = off)
+        self.clock: Callable[[], float] = time.monotonic
+        self._follow_until = 0.0
+
+    def note_reply(self) -> None:
+        """Called when Tara has just answered a person: the conversation with her is open for `follow_up_s`."""
+        self._follow_until = self.clock() + self.follow_up_s if self.follow_up_s > 0 else 0.0
 
     async def _intent(self, text: str, context: list[str]) -> Intent:
         if self._intent_cache is not None and self._intent_cache[0] == text:
@@ -102,6 +111,11 @@ class LiveParticipation:
             return GateDecision(Verdict.DENY, "takeover")
         if origin == "app":
             return GateDecision(Verdict.ALLOW, "app_initiated")
+        if (self.follow_up_s > 0 and self.clock() < self._follow_until and cfg.policy is SpeakingPolicy.ON_ADDRESS_ONLY
+                and cfg.mode not in INTERVIEW_MODES):
+            return GateDecision(Verdict.ALLOW, "follow_up")        # she was just talking to this room: no need to say her name again
+        if cfg.wake_by_model and cfg.policy is SpeakingPolicy.ON_ADDRESS_ONLY and cfg.mode not in INTERVIEW_MODES:
+            return GateDecision(Verdict.ALLOW, "model_wake")      # the model was told to answer only when called; trust its ears over the transcript
         if not text.strip():
             return GateDecision(Verdict.DENY, "no_transcript")     # fail silent when nothing is known about the turn
         intent = await self._intent(text, context or [])

@@ -32,13 +32,17 @@ class State(str, Enum):
 
 
 TERMINAL = {State.ENDED, State.REJECTED, State.FAILED}
-MEET_URL = re.compile(r"^https://meet\.google\.com/(?:lookup/)?([a-z]{3}-[a-z]{4}-[a-z]{3})(?:[/?#].*)?$", re.I)
+MEET_URL = re.compile(r"^https://meet\.google\.com/(?:lookup/|meet/)?([a-z]{3}-[a-z]{4}-[a-z]{3})(?:[/?#].*)?$", re.I)
 CODE = re.compile(r"^[a-z]{3}-[a-z]{4}-[a-z]{3}$", re.I)
 
 
 def parse_meet_link(value: str) -> tuple[str, str]:
     """Accept a Meet link or a bare code ('abc-defg-hij'). Returns (code, url). Raises ValueError for anything else."""
     v = value.strip()
+    while v.lower().startswith(("https://https://", "https://http://")):          # a pasted link with the scheme typed twice
+        v = v[len("https://"):]
+    if v.lower().startswith("meet.google.com/"):
+        v = "https://" + v
     if CODE.match(v):
         return v.lower(), f"https://meet.google.com/{v.lower()}"
     m = MEET_URL.match(v)
@@ -82,6 +86,8 @@ class WorkerConfig:
     poll_s: float = 1.0
     max_reconnects: int = 3
     reconnect_backoff_s: float = 2.0
+    people_stable_polls: int = 2         # a change in the people list must be seen this many polls in a row (the list flickers while it redraws)
+    camera_on: bool = False              # leave the camera on at the pre-join screen (it shows Tara's picture instead of video)
     gone_polls: int = 3                  # polls without the in-call controls before the call counts as lost
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
@@ -99,6 +105,8 @@ class MeetWorker:
         self.reconnects = 0
         self.ever_in_meeting = False                 # true once the bot was admitted, even if the meeting ended right after
         self.people: set[str] = set()
+        self._seen: set[str] | None = None
+        self._seen_n = 0
         self._close: Callable[[], Awaitable[None]] | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -209,7 +217,7 @@ class MeetWorker:
                 continue
             break
         await page.fill_name(c.bot_name)                                     # only filled when Meet asks for a name (guest)
-        if await page.visible(sel.CAMERA_TOGGLE_ON):
+        if not c.camera_on and await page.visible(sel.CAMERA_TOGGLE_ON):
             await page.click(sel.CAMERA_TOGGLE_ON)                           # camera off: audio-first, no video sent
         clicked = ""
         text = ""
@@ -283,7 +291,12 @@ class MeetWorker:
                     await page.click(sel.PEOPLE_BUTTON)                       # Meet only lists people while this panel is open
                 names = {n for n in await page.participants() if n and "(you)" not in n.lower()
                          and n.strip().lower() != c.bot_name.lower()}
-                if names != self.people:
+                if names == self._seen:
+                    self._seen_n += 1
+                else:
+                    self._seen, self._seen_n = names, 1
+                need = c.people_stable_polls if names else c.people_stable_polls + 1      # an empty list is the most likely flicker
+                if names != self.people and self._seen_n >= need:
                     joined, left = tuple(sorted(names - self.people)), tuple(sorted(self.people - names))
                     self.people = names
                     self.events.put_nowait(WorkerEvent("participants", joined=joined, left=left, names=tuple(sorted(names))))

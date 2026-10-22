@@ -18,11 +18,13 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+from ..audio import AdaptiveGain
 from ..contracts import AdapterCapabilities, DeliveryReceipt, MeetingEvent, MeetingEventKind, MeetingTarget, PCMChunk
 from ..errors import JoinError
 from ..metrics import Metrics
 from .bridge import IN_RATE, AudioBridge
 from .controller import InterviewSession, MeetController
+from .recorder import MeetingRecorder
 from .worker import TERMINAL, Launcher, MeetWorker, State, WorkerConfig, WorkerEvent
 
 MAX_STOPPED_IDS = 64
@@ -39,7 +41,8 @@ class MeetAdapter:
                  queue_chunks: int = 200, on_status: Status | None = None, metrics: Metrics | None = None,
                  on_first_participant: Callable[[], Awaitable[None]] | None = None, diag_s: float = 20.0,
                  warn_after_s: float = 30.0, log: Callable[[str], None] | None = None, audio: Any | None = None,
-                 cables: dict[str, str] | None = None, half_duplex: bool = False, tail_s: float = 1.2):
+                 cables: dict[str, str] | None = None, half_duplex: bool = False, tail_s: float = 1.2,
+                 on_people: Callable[[int], None] | None = None, picture: str = "", recorder: MeetingRecorder | None = None, gain: AdaptiveGain | None = None):
         self.capabilities = AdapterCapabilities(per_participant_audio=False, participant_events=True, send_audio=True,
                                                 delivery_confirmation=True, can_mute_self=False, can_camera=False,
                                                 can_show_image=False, can_mute_others=False)
@@ -54,6 +57,9 @@ class MeetAdapter:
         self._diag: asyncio.Task[None] | None = None
         self._heard = False
         self._tap_logged = False
+        self.gain = gain                              # lifts quiet voices before the model hears them (the recording stays raw)
+        self.recorder = recorder                      # opt-in audio recording (room + Tara), None = nothing is recorded
+        self.on_people = on_people                    # told how many other people are in the room whenever that (debounced) number changes
         self.half_duplex, self.tail_s = half_duplex, tail_s   # while Tara speaks (and for a moment after), meeting audio is replaced by silence
         self._speaking = False
         self._quiet_until = 0.0
@@ -62,7 +68,7 @@ class MeetAdapter:
         self._forward: asyncio.Task[None] | None = None
         self._peak = 0.0
         self.log = log or (lambda _m: None)           # detail that goes to the run log file, not the screen
-        self.bridge = AudioBridge(self._on_remote_audio, "devices" if audio is not None else "page", cables)
+        self.bridge = AudioBridge(self._on_remote_audio, "devices" if audio is not None else "page", cables, picture)
         self.worker: MeetWorker | None = None
         self.session: InterviewSession | None = None
         self._queue: asyncio.Queue[MeetingEvent | None] = asyncio.Queue(maxsize=queue_chunks)
@@ -203,7 +209,9 @@ class MeetAdapter:
         async for ev in self.devices.events():
             if ev.kind is MeetingEventKind.AUDIO:
                 chunk = ev.payload["chunk"]
-                gated = self._gate_echo(chunk.data)
+                if self.recorder is not None:
+                    self.recorder.write_room(chunk.data, chunk.sample_rate)
+                gated = self._gate_echo(self.gain.process(chunk.data) if self.gain is not None else chunk.data)
                 if gated is not chunk.data:
                     chunk = PCMChunk(gated, chunk.sample_rate, chunk.ts_ms, chunk.stream_id)
                 self._measure(chunk.data)
@@ -223,6 +231,8 @@ class MeetAdapter:
             self._pump.cancel()
             await asyncio.gather(self._pump, return_exceptions=True)
         self._joined = False
+        if self.recorder is not None:
+            self.recorder.close()
         self.controller.close_session(self.session_id, "ended")
         self._finish_stream()
 
@@ -265,6 +275,10 @@ class MeetAdapter:
         return sorted(self._people)
 
     def _stream_id(self) -> str:
+        """The label audio carries. In an interview it says who can be trusted as the candidate (exactly one other person, else `mix`).
+        In a normal meeting it never changes: a label that flips with the people list leaves the old label marked as still talking."""
+        if not self.interview_code:
+            return self.candidate_stream_id
         return self.candidate_stream_id if len(self._people) == 1 else "mix"
 
     def _gate_echo(self, pcm: bytes) -> bytes:
@@ -291,6 +305,10 @@ class MeetAdapter:
         if self._closed:
             return
         ts = int((time.monotonic() - self._t0) * 1000)
+        if self.recorder is not None:
+            self.recorder.write_room(pcm, IN_RATE)                  # the raw room audio, before any echo silencing
+        if self.gain is not None:
+            pcm = self.gain.process(pcm)
         pcm = self._gate_echo(pcm)
         self._emit(MeetingEventKind.AUDIO, {"chunk": PCMChunk(pcm, IN_RATE, ts, self._stream_id())})
         self.metrics.inc("meet_audio_frames_in")
@@ -321,6 +339,11 @@ class MeetAdapter:
             self._emit(MeetingEventKind.PARTICIPANT_JOINED, {"id": pid, "name": name})
         if self.devices is not None:
             self.devices.stream_id = self._stream_id()
+        if self.on_people is not None:
+            try:
+                self.on_people(len(self._people))
+            except Exception:  # noqa: BLE001 - a policy hiccup must not break the audio path
+                self.metrics.inc("meet_on_people_failed")
         self.on_status("people in the meeting: " + (", ".join(sorted(self._people.values())) or "nobody else yet"))
         if len(self._people) == 1:
             self.on_status("One participant is in the meeting: audio is attributed to the candidate.")
@@ -353,10 +376,16 @@ class MeetAdapter:
     async def send_audio(self, utterance_id: str, chunks: AsyncIterator[PCMChunk]) -> DeliveryReceipt:
         self._speaking = True
         try:
-            return await self._send_audio(utterance_id, chunks)
+            return await self._send_audio(utterance_id, self._tee(chunks))
         finally:
             self._speaking = False
             self._quiet_until = time.monotonic() + self.tail_s
+
+    async def _tee(self, chunks: AsyncIterator[PCMChunk]) -> AsyncIterator[PCMChunk]:
+        async for chunk in chunks:
+            if self.recorder is not None:
+                self.recorder.write_tara(chunk.data, chunk.sample_rate)
+            yield chunk
 
     async def _send_audio(self, utterance_id: str, chunks: AsyncIterator[PCMChunk]) -> DeliveryReceipt:
         if self.devices is not None:

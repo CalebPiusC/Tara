@@ -309,7 +309,8 @@ def adapter_for(tmp_path, pages, session="s1", **kw):
 
     cfg = WorkerConfig(clock=clock, sleep=clock.sleep, poll_s=0.5, join_timeout_s=10, admit_timeout_s=30, reconnect_backoff_s=0.1)
     status: list[str] = []
-    ad = MeetAdapter(ctrl, factory, session_id=session, interview_code="alex", url="https://meet.google.com/abc-defg-hij",
+    kw.setdefault("interview_code", "alex")
+    ad = MeetAdapter(ctrl, factory, session_id=session, url="https://meet.google.com/abc-defg-hij",
                      candidate_stream_id="a", worker_cfg=cfg, on_status=status.append, **kw)
     return ad, ctrl, status
 
@@ -722,3 +723,119 @@ def test_half_duplex_silences_the_meeting_while_tara_speaks_and_for_a_moment_aft
             await ad.leave()
             await pump
     run(go())
+
+
+def test_a_normal_meeting_keeps_one_audio_label_however_many_people_come_and_go(tmp_path):
+    async def go():
+        page = FakePage([INCALL], names=[])
+        ad, ctrl, status = adapter_for(tmp_path, [page], interview_code="", diag_s=0)
+        await ad.join(MeetingTarget())
+        events: list = []
+        pump = asyncio.create_task(gather(ad, events))
+        labels = []
+        for names in ([], ["Alex"], ["Alex", "Sam"], [], ["Sam"]):
+            page.names = names
+            await asyncio.sleep(0.15)
+            ad._on_remote_audio(b"\x01\x00" * 160)
+            await asyncio.sleep(0.01)
+            labels.append(events[-1].payload["chunk"].stream_id)
+        assert set(labels) == {"a"}                                                      # never flips to "mix" and back
+        await ad.leave()
+        await pump
+    run(go())
+
+
+def test_a_flickering_people_list_does_not_cause_join_and_leave_events():
+    async def go():
+        flicker = [["Alex"], [], ["Alex"], ["Alex"], [], ["Alex"], ["Alex"], ["Alex"]]
+        page = FakePage([INCALL], names=["Alex"])
+        calls = {"n": 0}
+        real = page.participants
+
+        async def participants():
+            i = calls["n"]
+            calls["n"] += 1
+            return list(flicker[i]) if i < len(flicker) else ["Alex"]
+        page.participants = participants
+        w, *_ = worker_for([page])
+        w.start()
+        await w.wait_for(State.IN_MEETING, timeout=500)
+        for _ in range(60):
+            await asyncio.sleep(0.01)
+        people = [e for e in await drain(w) if e.kind == "participants"]
+        assert [e.joined for e in people] == [("Alex",)] and not any(e.left for e in people)   # one stable join, no phantom leaves
+        await w.leave()
+        assert real is not None
+    run(go())
+
+
+def test_the_adapter_reports_how_many_people_are_in_the_room(tmp_path):
+    async def go():
+        page = FakePage([INCALL], names=[])
+        counts: list[int] = []
+        ad, ctrl, status = adapter_for(tmp_path, [page], interview_code="", diag_s=0, on_people=counts.append)
+        await ad.join(MeetingTarget())
+        events: list = []
+        pump = asyncio.create_task(gather(ad, events))
+        for names in (["Alex"], ["Alex", "Sam"], ["Sam"]):
+            page.names = names
+            await asyncio.sleep(0.2)
+        assert counts[0] == 1 and 2 in counts and counts[-1] == 1
+        await ad.leave()
+        await pump
+    run(go())
+
+
+def test_the_answer_policy_follows_the_head_count_unless_fixed():
+    from tara.config import SpeakingPolicy as P
+    from tara.meet.run import speaking_policy
+    assert speaking_policy(1, "auto") is P.PROACTIVE_ALLOWED
+    assert speaking_policy(2, "auto") is P.ON_ADDRESS_ONLY and speaking_policy(5, "auto") is P.ON_ADDRESS_ONLY
+    assert speaking_policy(5, "all") is P.PROACTIVE_ALLOWED and speaking_policy(1, "address") is P.ON_ADDRESS_ONLY
+
+
+def test_the_newer_meet_link_form_with_a_meet_segment_is_accepted():
+    from tara.meet.worker import parse_meet_link
+    assert parse_meet_link("https://meet.google.com/meet/dfr-dqbq-ein") == ("dfr-dqbq-ein", "https://meet.google.com/dfr-dqbq-ein")
+
+
+def test_the_camera_picture_is_built_and_injected_only_when_asked(tmp_path):
+    from PIL import Image
+
+    from tara.meet.bridge import bridge_js, make_picture
+    img = tmp_path / "p.png"
+    Image.new("RGB", (200, 300), (200, 100, 50)).save(img)
+    pic = make_picture(img, "Hey Tara, I am here to help")
+    assert pic.startswith("data:image/jpeg;base64,")
+    assert "__taraPicture" in bridge_js("devices", {"mic": "a", "speaker": "b"}, pic) and "__taraPicture =" not in bridge_js()
+
+
+def test_a_link_pasted_with_a_doubled_scheme_or_no_scheme_is_accepted():
+    from tara.meet.worker import parse_meet_link
+    want = ("cky-unfz-bpr", "https://meet.google.com/cky-unfz-bpr")
+    assert parse_meet_link("https://https://meet.google.com/cky-unfz-bpr") == want
+    assert parse_meet_link("meet.google.com/cky-unfz-bpr") == want
+
+
+def test_recorder_writes_aligned_valid_wav_files_and_survives_failure(tmp_path):
+    import wave
+
+    from tara.meet.recorder import MeetingRecorder
+    now = [0.0]
+    rec = MeetingRecorder(tmp_path / "r", "abc", clock=lambda: now[0])
+    one_second = b"\x01\x00" * 16000
+    rec.write_room(one_second, 16000)
+    now[0] = 3.0
+    rec.write_tara(b"\x02\x00" * 8000, 16000)                   # Tara starts talking 2.5 s in: the track is padded to the same timeline
+    rec.write_room(one_second, 16000)
+    rec.close()
+    with wave.open(str(rec.room.path)) as w:
+        assert w.getframerate() == 16000 and w.getnframes() == 48000 and w.getnchannels() == 1
+    with wave.open(str(rec.tara.path)) as w:
+        assert w.getnframes() == 48000                                  # same timeline as the room track
+    rec.room.fh = None
+    rec.room.rate = 0
+    bad = MeetingRecorder(tmp_path / "x", "b")
+    bad.room.path = tmp_path / "missing" / "no.wav"            # cannot be opened
+    bad.write_room(one_second, 16000)
+    assert bad.failed and bad.write_tara(one_second, 16000) is None

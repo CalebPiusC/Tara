@@ -33,7 +33,7 @@ Most meeting bots transcribe. Tara takes part. The difference is judgement: a mo
 - **Agenda and time-keeping.** Set an agenda and a length; Tara tracks what is covered and gives quiet nudges ("five minutes left").
 - **Recap and catch-up.** "Recap so far" and "what did I miss", plus a parking lot for off-topic points.
 - **Names and jargon.** A word list (file, env, or by voice) so names are written correctly.
-- **Meeting types.** Stand-up, one-to-one, retro, client call and brainstorm each change how Tara behaves and what the minutes look like (`./dev.sh --type standup`).
+- **Meeting types.** Stand-up, one-to-one, retro, client call and brainstorm each change how Tara behaves and what the minutes look like (`./dev.sh local --type standup`).
 
 ### Secretary
 - **Takes minutes** while the meeting runs: decisions, actions with owners, open questions.
@@ -44,7 +44,7 @@ Most meeting bots transcribe. Tara takes part. The difference is judgement: a mo
 - **Give her a CV, a GitHub account or a portfolio link.** She reads them and builds interview questions from the role and the candidate's skills.
 - **Runs the interview**, then grades each criterion with a verbatim quote from the candidate as evidence.
 - **Returns a report** that always asks for human review. She never says hire or reject.
-- **Create one from the terminal:** `./dev.sh interview new "Name"`, then `./dev.sh interview run <code>` ([INTERVIEWS](docs/INTERVIEWS.md)).
+- **Create one from the terminal:** `./dev.sh interview new "Name"`, then `./dev.sh interview run <code>` (add `--meet` to run it in Google Meet) ([INTERVIEWS](docs/INTERVIEWS.md)).
 
 ### Documents
 - **PDF, DOCX and Markdown** from an interview, a meeting, or anything you ask for.
@@ -64,13 +64,22 @@ Deterministic code sits between the model and the meeting. Gemini Live understan
 
 ```mermaid
 flowchart TB
-  MEET["Meeting platform: local mic and speakers today, Google Meet planned"] <--> MA["MeetingAdapter"]
+  subgraph Bot["Meeting bot (src/tara/meet)"]
+    direction LR
+    GM["Google Meet"] <--> CH["Bot's own Chrome (separate profile)"]
+    CH <-->|"BlackHole 2ch in, 16ch out"| CAB["Virtual audio cables"]
+    CAB --> PRE["Quiet-voice gain, echo guard"]
+    PRE --> REC2["Audio recorder (opt-in, WAV files)"]
+  end
+  LOCAL["Local mic and speakers (./dev.sh local)"] <--> MA
+  CAB <--> MA["MeetingAdapter"]
+  PRE --> MA
   MA --> UP
 
   subgraph Voice["Voice path"]
     direction LR
     UP["Bounded uplink"] --> PROV["Voice provider interface"]
-    PROV --> GATE["Participation gate"]
+    PROV --> GATE["Participation gate (standby: name, model wake, follow-up)"]
     GATE -->|"allowed audio only"| PB["Playback (cancellable)"]
   end
   PB --> MA
@@ -115,7 +124,7 @@ flowchart TB
   DOCT --> FILES
 ```
 
-Memory tools are remember, recall, update, forget and delete meeting. Meeting tools are open items, agenda, recap, meeting type and vocabulary. Lookups are time, weather, public pages and search. Working memory (the last turns) is re-seeded to the model after a reconnect, and metrics carry no content. Details of each layer are in [SYSTEM_ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md).
+Memory tools are remember, recall, update, forget and delete meeting. Meeting tools are open items, agenda, recap, meeting type and vocabulary. Lookups are time, weather, public pages and search. Working memory (the last turns, plus a short digest of older ones) is re-seeded to the model after a reconnect, framed as data and never as instructions; a stale resume handle is dropped after one failed try, and reconnecting keeps trying for about a minute. Gemini Live also compresses its own context window (sliding window) so a long call does not end at 15 minutes. Metrics carry no content. Details of each layer are in [SYSTEM_ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md).
 
 Tara is cloud-backed: audio and transcripts go to Google. Details: [GEMINI_LIVE](docs/GEMINI_LIVE.md), [SYSTEM_ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md).
 
@@ -262,31 +271,33 @@ createdb tara_memory
 .venv/bin/python -m tara.memory.migrate
 ```
 
-**4. Talk to Tara.** Headphones give the best result. Give the section a name to keep its memory separate.
+**4. Join a meeting (the main way to use Tara).** One-time setup for the bot's own Google account and the two virtual audio cables is in [GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md). After that:
 ```bash
-set -a; source .env; set +a
-.venv/bin/python -m tara.voice.demo --one-on-one              # headphones
-.venv/bin/python -m tara.voice.demo --one-on-one --speaker    # speakers (mic muted while she talks)
+./dev.sh                                  # asks "Which meeting?", then joins (Enter reuses the last link)
+./dev.sh https://meet.google.com/abc-defg-hij   # same, no question
 ```
+Both run exactly this, which you can also type yourself:
 ```bash
-./dev.sh --section join      # the next numbered meeting of section 'join'; a new name starts a fresh section
-./dev.sh --list                # sections and their meetings with dates
+./dev.sh meet join https://meet.google.com/abc-defg-hij --audio devices --half-duplex --transcripts --model-wake
 ```
-Without `--one-on-one`, say "Tara, ..." to get her attention.
+Tara joins as her own participant, waits to be admitted, and shows her picture as the camera. She listens and takes notes the whole time and answers only when called ("Hey Tara", at the start, middle or end of a sentence); for 8 seconds after an answer you can keep talking without her name. Useful extras: `--record` (save the audio as WAV files, tell everyone first), `--reply-to-all`, `--no-camera`, `--no-gain`, `--follow-up 0`.
 
-**5. Run an interview (optional).** Create one from the terminal: drop a GitHub link and a CV, say how many questions and how hard, and get a code.
+**5. Run an interview (the other way in).** Create one from the terminal: drop a GitHub link and a CV, say how many questions and how hard, and get a code.
 ```bash
-./dev.sh interview new "Feremi"       # asks for the role, GitHub, portfolio and CV (drag the file in)
-./dev.sh interview run feremi         # Tara greets, confirms the name and runs the questions
-./dev.sh interview list               # prepared interviews and results
+./dev.sh interview new "Feremi"             # asks for the role, GitHub, portfolio and CV (drag the file in)
+./dev.sh interview run feremi --meet        # asks for the meeting link, then runs it inside Google Meet
+./dev.sh interview run feremi               # or on this computer only (you play the candidate)
+./dev.sh interview list                     # prepared interviews and results
 ```
 Reports are written to `work/documents`. See [INTERVIEWS](docs/INTERVIEWS.md).
 
-To run the same interview in a Google Meet with a dedicated bot account (needs the bot account, see [GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)):
+**Local only, no meeting.** To talk to Tara on this computer (headphones give the best result; give the section a name to keep its memory separate):
 ```bash
-./dev.sh meet login                                  # sign the bot's Google account in, once
-./dev.sh meet join https://meet.google.com/abc-defg-hij --interview feremi
+./dev.sh local --headphones
+./dev.sh local --section join      # the next numbered meeting of section 'join'
+./dev.sh local --list              # sections and their meetings with dates
 ```
+Say "Tara, ..." to get her attention.
 
 **6. Run the tests**
 ```bash
@@ -328,7 +339,7 @@ Tara:  You agreed to send the offer decision by Friday.
 ---
 
 ## What is next
-The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
+The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Emailing the summary as a document, by voice or automatically, is planned in [EMAIL_DELIVERY](docs/EMAIL_DELIVERY.md) (not built). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
 
 ---
 
@@ -345,6 +356,6 @@ Contributions are welcome.
 
 ## License
 
-None chosen yet.
+MIT. See [LICENSE](LICENSE).
 
 *A good meeting participant is mostly someone who knows when not to speak.*

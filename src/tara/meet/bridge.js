@@ -185,6 +185,13 @@
   function blackTrack() {
     const c = document.createElement("canvas"); c.width = 640; c.height = 360;
     const g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 640, 360);
+    if (window.__taraPicture) {                                                  // Tara's picture with its caption, redrawn so the frame keeps flowing
+      const img = new Image(); let ready = false;
+      img.onload = () => { ready = true; };
+      img.src = window.__taraPicture;
+      setInterval(() => { if (ready) g.drawImage(img, 0, 0, 640, 360); else g.fillRect(0, 0, 1, 1); }, 500);
+      return c.captureStream(2).getVideoTracks()[0];
+    }
     setInterval(() => { g.fillRect(0, 0, 1, 1); }, 500);
     return c.captureStream(2).getVideoTracks()[0];
   }

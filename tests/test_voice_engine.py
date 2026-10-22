@@ -659,3 +659,21 @@ def test_a_failed_tool_never_leaves_the_model_without_an_answer_and_silence_is_b
             await until(lambda: eng.metrics.counters["live_error_prompts"] == 1)           # the model said nothing, so it is asked
             assert len(s.texts) == 1 and "failed" in s.texts[0] and "secret" in s.texts[0]
     run(go())
+
+
+def test_a_stale_resume_handle_is_dropped_after_one_failure_and_the_next_attempt_reseeds():
+    from tara.errors import ProviderError
+
+    async def go():
+        s1, s2 = FakeVoiceSession(), FakeVoiceSession()
+        eng, _, prov, _ = mk(sessions=[s1, s2], failures=[], factor=0.1)
+        async with running(eng):
+            eng.working.add_turn("Recruiter", "the budget is ten thousand")
+            s1.push(ResumptionHandle("old-handle", True))
+            await until(lambda: eng._resume is not None)
+            prov.failures.append(ProviderError("handle expired"))
+            s1.push(Disconnected("reset", True))
+            await until(lambda: eng.metrics.counters["live_reconnects"] == 1)
+            assert [h for _c, h in prov.opened] == [None, "old-handle", None]            # the stale handle was tried once, then dropped
+            assert "budget is ten thousand" in s2.contexts[0]                            # and the fresh session got the conversation back
+    run(go())

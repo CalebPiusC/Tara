@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import os
 import shutil
 import subprocess
@@ -122,7 +123,18 @@ async def probe(settings: RuntimeSettings, link: str) -> int:
     return 0
 
 
-def _meet_meeting(reply_to_all: bool) -> MeetingConfig:
+def speaking_policy(people: int, mode: str):  # noqa: ANN201 - returns config.SpeakingPolicy
+    """Who Tara answers. `auto`: any speech while one other person is here, only her name once there are two or more (several people
+    talk to each other, and answering all of it would be rude and confusing). `all` and `address` are fixed."""
+    from ..config import SpeakingPolicy
+    if mode == "all":
+        return SpeakingPolicy.PROACTIVE_ALLOWED
+    if mode == "address":
+        return SpeakingPolicy.ON_ADDRESS_ONLY
+    return SpeakingPolicy.ON_ADDRESS_ONLY if people >= 2 else SpeakingPolicy.PROACTIVE_ALLOWED
+
+
+def _meet_meeting(reply_to_all: bool, wake_by_model: bool = False) -> MeetingConfig:
     """A normal meeting: the person in the room is the organizer. By default Tara answers any speech (right for a call with one
     person); with several people use address-only so she answers only when called by name."""
     from ..config import Mode, ParticipantSpec, Role, SpeakingPolicy
@@ -131,11 +143,12 @@ def _meet_meeting(reply_to_all: bool) -> MeetingConfig:
         policy=SpeakingPolicy.PROACTIVE_ALLOWED if reply_to_all else SpeakingPolicy.ON_ADDRESS_ONLY,
         participants=(ParticipantSpec("you", "You", Role.ORGANIZER),),
         disclosure_text="Tara is an AI participant. Audio is sent to Gemini Live. Nothing is recorded as audio or video.",
-        behaviour_profile="professional")
+        behaviour_profile="professional", wake_by_model=wake_by_model)
 
 
 async def join(settings: RuntimeSettings, link: str, code: str = "", headless: bool | None = None, *, section: str = "default",
-               address_only: bool = False, transcripts: bool = False, audio: str = "", half_duplex: bool | None = None) -> int:
+               address_only: bool = False, transcripts: bool = False, audio: str = "", half_duplex: bool | None = None,
+               reply_to_all: bool = False, camera: bool = True, model_wake: bool = False, record: bool = False, gain: bool = True, follow_up_s: float = 8.0) -> int:
     """Join as Tara. With an interview code she runs that interview; without one it is a normal meeting."""
     from ..config import AppPolicy, Role
     from ..config import validate as validate_config
@@ -146,6 +159,7 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
     from ..voice.memory import Scope
 
     interview = code.strip().lower()
+    answer_mode = "all" if reply_to_all and not address_only else "address"      # standby by default: listens and takes notes, answers when called
     errors = [f"{i.field}: {i.message}" for i in validate_settings(settings) if i.severity == "error"]
     if interview and (not settings.work.enabled or not settings.work.hiring):
         errors.append("TARA_WORK_ENABLED: interviews need TARA_WORK_ENABLED=1")
@@ -168,7 +182,7 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
             scope = Scope("local", meeting_slug(f"interview-{prof.candidate_id}"))
             who = prof.label
         else:
-            cfg = _meet_meeting(reply_to_all=not address_only)
+            cfg = _meet_meeting(reply_to_all=answer_mode != "address", wake_by_model=model_wake and answer_mode == "address")
             roles, names = {"you": Role.ORGANIZER}, {"you": "You"}
             scope = Scope("local", meeting_slug(section))
             who = ""
@@ -194,8 +208,8 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
             print("The virtual audio cables are not available: " + "; ".join(problems) + f".\n{INSTALL_HELP}", file=sys.stderr)
             return 2
         try:
-            devices_audio = AudioDeviceAdapter(SoundDeviceBackend(input_device=m.in_device, output_device=m.out_device), stream_id="you",
-                                               out_channels=2)
+            devices_audio = AudioDeviceAdapter(SoundDeviceBackend(input_device=m.in_device, output_device=m.out_device, output_latency="high"),
+                                               stream_id="you", out_channels=2, prebuffer_ms=200)
         except JoinError as exc:
             print(f"audio device problem: {exc}", file=sys.stderr)
             return 2
@@ -209,12 +223,26 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
         if app is not None and interview:
             await app.say_pending_opening()
 
+    from ..audio import AdaptiveGain
     from .adapter import MeetAdapter
+
+    def people_changed(count: int) -> None:
+        """Switch who she answers when the room fills up (normal meetings only; interviews have their own rules)."""
+        app_ = holder.get("app")
+        if app_ is None or interview or answer_mode != "auto":
+            return
+        part = app_.engine.participation
+        wanted = speaking_policy(count, answer_mode)
+        if wanted is not part.cfg.policy:
+            part.cfg = dataclasses.replace(part.cfg, policy=wanted)
+            say("two or more people are here: Tara now answers only when called by name (\"Tara, ...\")." if count >= 2
+                else "one other person is here: Tara answers when they speak.")
+
     log_path = Path(m.profile_dir).parent / "last-run.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("w", encoding="utf-8")
     log_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} meet run: meeting {meet_code}, interview={interview or 'none'}, "
-                   f"mode={'address-only' if address_only else 'reply-to-all'}, audio={route}, "
+                   f"answers={answer_mode}, audio={route}, "
                    f"half_duplex={m.half_duplex if half_duplex is None else half_duplex}\n")
 
     def log_line(msg: str) -> None:
@@ -225,17 +253,34 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
         print(f"[meet] {msg}", flush=True)
         log_line(f"[meet] {msg}")
 
+    recorder = None
+    if record:
+        from .recorder import MeetingRecorder
+        recorder = MeetingRecorder(Path(m.profile_dir).parent / "recordings", f"{meet_code}-{time.strftime('%Y%m%d-%H%M%S')}")
+        say(f"RECORDING is on: audio is saved on this computer in {recorder.room.path.parent}. Tell everyone in the meeting.")
+    picture = ""
+    if camera:
+        image = Path(__file__).resolve().parents[3] / "image" / "image.png"
+        if image.is_file():
+            try:
+                from .bridge import make_picture
+                picture = make_picture(image, 'Call me: "Hey Tara". I\'m here to help.')
+            except Exception as exc:  # noqa: BLE001 - the picture is optional; the meeting must not depend on it
+                say(f"no camera picture ({type(exc).__name__}); Tara joins with the camera off")
     adapter = MeetAdapter(
         ctrl, lambda bridge: playwright_launcher(browser, bridge), session_id=session_id, interview_code=interview, url=url,
         candidate_stream_id="you",
         worker_cfg=WorkerConfig(bot_name=m.bot_name, join_timeout_s=m.join_timeout_s, admit_timeout_s=m.admit_timeout_s,
-                                max_reconnects=m.reconnects),
+                                max_reconnects=m.reconnects, camera_on=bool(picture)),
         on_status=say, on_first_participant=greet, log=log_line, audio=devices_audio, cables=cables,
-        half_duplex=m.half_duplex if half_duplex is None else half_duplex)
+        half_duplex=m.half_duplex if half_duplex is None else half_duplex, on_people=people_changed, picture=picture, recorder=recorder,
+        gain=AdaptiveGain() if gain else None)
     bus = EventBus()
     app = LiveTaraApp(settings, cfg, roles, names, adapter, session_id=session_id, scope=scope, bus=bus, user_id="you",
                       interview_code=interview, defer_opening=bool(interview))
     holder["app"] = app
+    app.engine.participation.follow_up_s = 0.0 if interview or answer_mode == "all" else follow_up_s
+    app.engine.p = dataclasses.replace(app.engine.p, adaptive_vad=True, reconnect_attempts=8)       # a call's background noise must not count as someone talking
     if transcripts:
         def show(kind: str, text: str) -> None:
             print(f"[{kind}] {text}", flush=True)
@@ -265,11 +310,13 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
         await app.start()
         if interview:
             print(f"Tara is in the meeting. She will greet {who} when they join. Ctrl+C ends the interview.", flush=True)
-        elif address_only:
+        elif answer_mode == "address":
             print("Tara is in the meeting. Say \"Tara, ...\" to talk to her. Ctrl+C ends the session.", flush=True)
+        elif answer_mode == "all":
+            print("Tara is in the meeting and answers any speech. Ctrl+C ends the session.", flush=True)
         else:
-            print("Tara is in the meeting and will answer when you speak (use --address-only to make her wait to be called by name). "
-                  "Ctrl+C ends the session.", flush=True)
+            print("Tara is in the meeting. She answers any speech while one other person is here, and only \"Tara, ...\" once there are two or "
+                  "more (--address-only or --reply-to-all fix it either way). Ctrl+C ends the session.", flush=True)
         await app.engine.wait_closed()
         print("The meeting session ended.", flush=True)
         log_line("session ended")
@@ -303,7 +350,14 @@ def _parser() -> argparse.ArgumentParser:
     j.add_argument("--section", default=os.environ.get("TARA_SECTION", "default"), help="memory section for a normal meeting (default: TARA_SECTION or default)")
     j.add_argument("--type", dest="meeting_type", default=os.environ.get("TARA_MEETING_TYPE", "general"),
                    help="meeting type: general, standup, one_on_one, retro, client_call, brainstorm")
-    j.add_argument("--address-only", action="store_true", help="Tara answers only when called by name (use this with several people)")
+    j.add_argument("--address-only", action="store_true", help="Tara answers only when called by name, always")
+    j.add_argument("--reply-to-all", action="store_true", help="Tara answers any speech (default: she listens and takes notes, and answers only when called, like \"Hey Tara\")")
+    j.add_argument("--model-wake", action="store_true", help="standby where the model itself decides whether it was called by name (use when the transcript misses her name); experimental")
+    j.add_argument("--record", action="store_true", help="save the meeting audio (room and Tara) as WAV files under work/meet/recordings; tell everyone first")
+    j.add_argument("--follow-up", type=float, default=8.0, metavar="SECONDS",
+                   help="after she answers, keep talking to her this long without saying her name again (0 = off, default 8)")
+    j.add_argument("--no-gain", action="store_true", help="do not lift quiet voices (automatic volume for what Tara hears)")
+    j.add_argument("--no-camera", action="store_true", help="join with the camera off instead of showing Tara's picture")
     j.add_argument("--transcripts", action="store_true", help="print what Tara heard and said on this screen (shows speech)")
     j.add_argument("--audio", choices=("page", "devices"), default="", help="audio route: page (taps in the page) or devices (two virtual "
                    "audio cables, see docs/GOOGLE_MEET_BOT.md); default TARA_MEET_AUDIO")
@@ -328,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "probe":
             return asyncio.run(probe(settings, args.link))
         return asyncio.run(join(settings, args.link, args.interview, args.headless, section=args.section,
-                                address_only=args.address_only, transcripts=args.transcripts, audio=args.audio, half_duplex=args.half_duplex))
+                                address_only=args.address_only, transcripts=args.transcripts, audio=args.audio, half_duplex=args.half_duplex, reply_to_all=args.reply_to_all, camera=not args.no_camera, model_wake=args.model_wake, record=args.record, gain=not args.no_gain, follow_up_s=args.follow_up))
     except KeyboardInterrupt:
         return 130
 

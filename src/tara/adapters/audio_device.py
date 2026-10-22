@@ -44,7 +44,8 @@ class AudioBackend(Protocol):
 class SoundDeviceBackend:
     """Lazy sounddevice wrapper. The SDK is an optional audio extra, not a model."""
 
-    def __init__(self, input_device: str | int | None = None, output_device: str | int | None = None, sd_module: Any = None) -> None:
+    def __init__(self, input_device: str | int | None = None, output_device: str | int | None = None, sd_module: Any = None,
+                 output_latency: str | float | None = None) -> None:
         """`input_device` / `output_device` pick a specific device by name (a part of the name is enough) or index; None means the default."""
         if sd_module is None:
             try:
@@ -53,6 +54,7 @@ class SoundDeviceBackend:
                 raise JoinError("sounddevice is not installed; install with `pip install -e '.[audio]'`") from exc
             sd_module = sounddevice
         self._sd = sd_module
+        self._latency = output_latency          # "high" gives the output a bigger cushion against gaps (a virtual cable has no speaker to protect)
         self._in = self._resolve(input_device, "input") if input_device is not None else None
         self._out = self._resolve(output_device, "output") if output_device is not None else None
 
@@ -72,6 +74,8 @@ class SoundDeviceBackend:
 
     def open_output(self, *, samplerate: int, channels: int, dtype: str) -> Any:
         kw: dict[str, Any] = {} if self._out is None else {"device": self._out}
+        if self._latency is not None:
+            kw["latency"] = self._latency
         return self._sd.RawOutputStream(samplerate=samplerate, channels=channels, dtype=dtype, **kw)
 
     def default_output_rate(self) -> int:
@@ -150,12 +154,13 @@ class AudioDeviceAdapter:
 
     def __init__(self, backend: AudioBackend | None = None, *, stream_id: str = "you", mic_rate: int = MIC_RATE,
                  out_rate: int = OUT_RATE, blocksize: int = MIC_BLOCK, queue_chunks: int = 100,
-                 half_duplex: bool = False, out_channels: int = 1):
+                 half_duplex: bool = False, out_channels: int = 1, prebuffer_ms: int = 0):
         self.capabilities = AdapterCapabilities(per_participant_audio=True, delivery_confirmation=True,
                                                 can_mute_self=False, can_camera=False, can_show_image=False,
                                                 can_mute_others=False)
         self.stream_id = stream_id
         self.mic_rate, self.out_rate, self.blocksize = mic_rate, out_rate, blocksize
+        self.prebuffer_ms = max(0, prebuffer_ms)     # collect this much of a reply before the first write, so late chunks do not leave gaps
         self.out_channels = max(1, out_channels)     # a virtual cable often wants stereo: the mono voice is copied to every channel
         self.half_duplex = half_duplex          # speaker mode: mic sends silence while Tara speaks (no echo)
         self._backend = backend
@@ -310,6 +315,9 @@ class AudioDeviceAdapter:
             self._play = None
             return DeliveryReceipt(utterance_id, 0, False)
         completed = False
+        pre: list[bytes] = []
+        pre_ms = 0
+        started = self.prebuffer_ms <= 0
         try:
             async for chunk in chunks:
                 if state.stopped or self._closed:
@@ -321,6 +329,12 @@ class AudioDeviceAdapter:
                     data = resample_pcm16(data, chunk.sample_rate, self.out_rate)
                 if self.out_channels > 1:
                     data = expand_channels(data, self.out_channels)
+                if not started:
+                    pre.append(data)
+                    pre_ms += int(len(data) / 2 / (self.out_rate * self.out_channels) * 1000)
+                    if pre_ms < self.prebuffer_ms:
+                        continue
+                    started, data, pre = True, b"".join(pre), []
                 try:
                     written = await asyncio.to_thread(_write, state, data)
                 except Exception:  # noqa: BLE001 - a broken sink ends this response only
@@ -330,8 +344,15 @@ class AudioDeviceAdapter:
                 if not written:
                     break
                 if not state.stopped:
-                    state.delivered_ms += int(len(data) / 2 / self.out_rate * 1000)
+                    state.delivered_ms += int(len(data) / 2 / (self.out_rate * self.out_channels) * 1000)
             else:
+                if pre and not state.stopped and not self._closed:         # a short reply: write what was held back
+                    data = b"".join(pre)
+                    try:
+                        if await asyncio.to_thread(_write, state, data):
+                            state.delivered_ms += int(len(data) / 2 / (self.out_rate * self.out_channels) * 1000)
+                    except Exception:  # noqa: BLE001
+                        self.playback_failures += 1
                 completed = not state.stopped and not self._closed
         finally:
             await asyncio.to_thread(_close_stream, state, drain=completed)

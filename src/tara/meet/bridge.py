@@ -11,15 +11,51 @@ import binascii
 import json
 from collections.abc import Callable
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 IN_RATE = 16000
 MAX_PLAY_BYTES = 480_000          # about 10 s at 24 kHz; callers send chunks far smaller than this
 
 
-def bridge_js(mode: str = "page", devices: dict[str, str] | None = None) -> str:
+def make_picture(image: Path, caption: str, size: tuple[int, int] = (640, 360)) -> str:
+    """Tara's picture with the caption written on it, as a small JPEG data URL (shown as the camera). Needs Pillow."""
+    import io
+
+    from PIL import Image, ImageDraw, ImageFont
+    w, h = size
+    frame = Image.new("RGB", size, (16, 18, 24))
+    with Image.open(image) as opened:
+        src = opened.convert("RGB")
+        bar = int(h * 0.2)
+        src.thumbnail((w, h - bar))
+        frame.paste(src, ((w - src.width) // 2, (h - bar - src.height) // 2))
+    d = ImageDraw.Draw(frame)
+    fsize = max(12, h // 17)
+    font = ImageFont.load_default(size=fsize)
+    lines, line = [], ""
+    for word in caption.split():                                        # wrap the caption to the frame width
+        trial = f"{line} {word}".strip()
+        if d.textlength(trial, font=font) > w - 24 and line:
+            lines.append(line)
+            line = word
+        else:
+            line = trial
+    lines.append(line)
+    y: float = h - int(h * 0.2) + 6
+    for ln in lines[:2]:
+        d.text(((w - d.textlength(ln, font=font)) // 2, y), ln, fill=(255, 255, 255), font=font)
+        y += fsize + 4
+    out = io.BytesIO()
+    frame.save(out, "JPEG", quality=80)
+    return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode("ascii")
+
+
+def bridge_js(mode: str = "page", devices: dict[str, str] | None = None, picture: str = "") -> str:
     """The bridge script. `mode="devices"` points the page at two virtual audio cables (names given in `devices`: mic, speaker)."""
     body = files("tara.meet").joinpath("bridge.js").read_text(encoding="utf-8")
+    if picture:
+        body = f"window.__taraPicture = {json.dumps(picture)};\n" + body
     if mode != "devices":
         return body
     cfg = json.dumps({"mic": (devices or {}).get("mic", ""), "speaker": (devices or {}).get("speaker", "")})
@@ -27,8 +63,10 @@ def bridge_js(mode: str = "page", devices: dict[str, str] | None = None) -> str:
 
 
 class AudioBridge:
-    def __init__(self, on_audio: Callable[[bytes], None], mode: str = "page", devices: dict[str, str] | None = None):
+    def __init__(self, on_audio: Callable[[bytes], None], mode: str = "page", devices: dict[str, str] | None = None,
+                 picture: str = ""):
         self._on_audio = on_audio
+        self.picture = picture
         self.mode, self.devices = mode, devices
         self.frames_in = 0
         self.bytes_in = 0
@@ -37,7 +75,7 @@ class AudioBridge:
     async def attach(self, context: Any) -> None:
         """Install on a browser context BEFORE any page loads: the init script wraps WebRTC and getUserMedia first."""
         await context.expose_function("__taraAudioIn", self._receive)
-        await context.add_init_script(script=bridge_js(self.mode, self.devices))
+        await context.add_init_script(script=bridge_js(self.mode, self.devices, self.picture))
 
     def _receive(self, data: str) -> None:
         try:

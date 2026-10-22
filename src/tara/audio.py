@@ -94,6 +94,71 @@ class EnergyVad:
         return rms(frame) >= self.threshold
 
 
+class AdaptiveEnergyVad:
+    """RMS gate that follows the background level, so steady hiss, hum or a distant fan is not mistaken for someone talking.
+
+    The noise floor falls quickly when it gets quieter and rises only slowly, so a sentence barely moves it but constant noise is learned
+    within about fifteen seconds. Speech must exceed `ratio` times the floor and also the fixed `base_threshold`.
+    """
+
+    def __init__(self, base_threshold: float = 500.0, ratio: float = 3.0, rise: float = 0.002, frame_ms: int = 30, sample_rate: int = 16000):
+        self.base_threshold, self.ratio, self.rise = base_threshold, ratio, rise
+        self.frame_ms, self.sample_rate = frame_ms, sample_rate
+        self.floor: float | None = None
+
+    @property
+    def threshold(self) -> float:
+        return max(self.base_threshold, (self.floor or 0.0) * self.ratio)
+
+    def is_speech(self, frame: bytes) -> bool:
+        r = rms(frame)
+        if self.floor is None:
+            self.floor = r
+        elif r < self.floor:
+            self.floor = 0.8 * self.floor + 0.2 * r
+        else:
+            self.floor += (r - self.floor) * self.rise
+        return r >= self.threshold
+
+
+class AdaptiveGain:
+    """Brings quiet voices up to a steady level before the speech model hears them, and never boosts silence or steady noise.
+
+    Per chunk: measure the level, follow the noise floor (as the adaptive VAD does), and only chunks clearly above the floor and above
+    `min_level` count as speech. Speech gets a gain that moves toward `target / level` (capped at `max_gain`): it comes down fast when a
+    voice gets loud and rises slowly, so a quiet voice is lifted without pumping. Nothing is added to non-speech chunks (the gain holds).
+    Samples are hard-limited to 16 bit. Cost is one pass over the chunk, no extra delay.
+    """
+
+    def __init__(self, target: float = 2500.0, max_gain: float = 8.0, min_level: float = 60.0, floor_ratio: float = 2.0,
+                 rise: float = 0.002, attack: float = 0.6, release: float = 0.15):
+        self.target, self.max_gain, self.min_level, self.floor_ratio = target, max_gain, min_level, floor_ratio
+        self.rise, self.attack, self.release = rise, attack, release
+        self.gain = 1.0
+        self.floor: float | None = None
+
+    def process(self, data: bytes) -> bytes:
+        s = pcm16_samples(data)
+        if not s:
+            return data
+        level = math.sqrt(sum(x * x for x in s) / len(s))
+        if self.floor is None:
+            self.floor = level
+        elif level < self.floor:
+            self.floor = 0.8 * self.floor + 0.2 * level
+        else:
+            self.floor += (level - self.floor) * self.rise
+        if level >= max(self.min_level, self.floor * self.floor_ratio):
+            want = min(self.max_gain, max(1.0, self.target / level))
+            k = self.attack if want < self.gain else self.release
+            self.gain += (want - self.gain) * k
+        if self.gain < 1.05:
+            return data
+        g = self.gain
+        out = array("h", (max(-32768, min(32767, int(x * g))) for x in s))
+        return out.tobytes()
+
+
 @dataclass(frozen=True)
 class SpeechStarted:
     stream_id: str

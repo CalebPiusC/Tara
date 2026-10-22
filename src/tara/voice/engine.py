@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import events as bus_events
-from ..audio import EnergyVad, Segmenter, SegmentReady, SpeechStarted, resample_pcm16
+from ..audio import AdaptiveEnergyVad, EnergyVad, Segmenter, SegmentReady, SpeechStarted, resample_pcm16
 from ..behaviour.controller import BehaviourController
 from ..behaviour.expressions import Expression, ExpressionEmitter, emotion_for
 from ..behaviour.signals import analyze as analyze_signals
@@ -87,6 +87,7 @@ class LiveParams:
     uplink_queue: int = 100            # bounded; oldest mic audio is dropped (and counted) if the network lags
     reconnect_attempts: int = 3
     reconnect_backoff_s: float = 0.5
+    reconnect_backoff_max_s: float = 8.0   # backoff doubles up to this (a long network drop is survived, not given up on)
     local_barge_in: bool = True        # stop playback on local speech BEFORE the provider reports it
     hybrid_end_of_speech: bool = False  # send audio_stream_end when local VAD sees speech end (benefit unverified)
     max_tool_tasks: int = 4
@@ -94,6 +95,9 @@ class LiveParams:
     self_stream_id: str = "tara"
     attribution_window_s: float = 6.0
     min_local_speech_ms: int = 150     # blips shorter than this never cancel playback
+    stale_stream_s: float = 1.0        # a stream that has sent no audio for this long cannot still be talking
+    ambient_speech_s: float = 6.0      # one stream "speaking" without a pause this long is background noise, not a sentence
+    adaptive_vad: bool = False         # follow the background level (steady noise is not speech); on for the Meet bot
     floor_wait_ms: int = 2500          # allowed speech waits this long for a participant who is mid-sentence
     guidance_injection: bool = True    # send style notes mid-session (supported per docs; effect unverified)
     leave_grace_s: float = 6.0         # how long a spoken goodbye may take before leaving anyway
@@ -137,6 +141,7 @@ class LiveVoiceEngine:
         self.participation, self.sessions, self.tools = participation, registry, tools
         self.metrics = metrics or Metrics()
         self.clock, self.p = clock, params or LiveParams()
+        self.participation.clock = clock
         self.playback = playback or PlaybackController(adapter, self.metrics, clock=clock)
         self.behaviour, self.expressions = behaviour, expressions
         self.playback.on_finished = self._on_playback_finished
@@ -172,6 +177,8 @@ class LiveVoiceEngine:
         self._segmenters: dict[str, Segmenter] = {}
         self._speaker_seen: dict[str, float] = {}
         self._active_streams: set[str] = set()
+        self._active_since: dict[str, float] = {}
+        self._last_frame: dict[str, float] = {}
         self._overlap = False
         self._gates: dict[int, _Gate] = {}
         self._suppress_through = 0
@@ -312,13 +319,17 @@ class LiveVoiceEngine:
                 pass
         self._uplink.put_nowait(data)
         self.metrics.gauge("live_uplink_depth", self._uplink.qsize())
-        seg = self._segmenters.setdefault(chunk.stream_id, Segmenter(
-            EnergyVad(), chunk.stream_id, min_speech_ms=self.p.min_local_speech_ms))
+        self._last_frame[chunk.stream_id] = self.clock()
+        seg = self._segmenters.get(chunk.stream_id)
+        if seg is None:
+            seg = self._segmenters[chunk.stream_id] = Segmenter(
+                AdaptiveEnergyVad() if self.p.adaptive_vad else EnergyVad(), chunk.stream_id, min_speech_ms=self.p.min_local_speech_ms)
         for out in seg.feed(PCMChunk(data, 16000, chunk.ts_ms, chunk.stream_id)):
             if isinstance(out, SpeechStarted):
                 await self._on_local_speech_started(out.stream_id)
             elif isinstance(out, SegmentReady):
                 self._active_streams.discard(out.segment.stream_id)
+                self._active_since.pop(out.segment.stream_id, None)
                 self._turn_end_at = self.clock()
                 if not self._active_streams:
                     self._overlap = False
@@ -353,6 +364,7 @@ class LiveVoiceEngine:
         # interrupted turn belongs to the previous speaker, not to the person interrupting now.
         att_before = self._attribution() if self.playback.is_playing and self._turn_text.strip() else None
         self._active_streams.add(stream_id)
+        self._active_since.setdefault(stream_id, self.clock())
         if len(self._active_streams) > 1:
             self._overlap = True
         self._speaker_seen[stream_id] = self.clock()
@@ -527,10 +539,27 @@ class LiveVoiceEngine:
         finally:
             g.evaluating = False
 
+    def _busy_streams(self) -> set[str]:
+        """Streams that really are mid-sentence. A stream that stopped sending audio (its label changed, a participant left) or that has
+        'spoken' without a pause for several seconds (steady noise) is not someone to wait for."""
+        now = self.clock()
+        busy: set[str] = set()
+        for sid in list(self._active_streams):
+            if now - self._last_frame.get(sid, now) > self.p.stale_stream_s:
+                self._active_streams.discard(sid)
+                self._active_since.pop(sid, None)
+                self._segmenters.pop(sid, None)
+                self.metrics.inc("stale_streams_cleared")
+            elif now - self._active_since.get(sid, now) > self.p.ambient_speech_s:
+                self.metrics.inc("ambient_streams_ignored")
+            else:
+                busy.add(sid)
+        return busy
+
     async def _apply_decision(self, g: _Gate, d: GateDecision, final: bool) -> None:
         if d.verdict is Verdict.ALLOW:
             self._finish_gate(g, "allowed", d.reason)
-            if self._active_streams:                      # a participant is mid-sentence: do not talk over them
+            if self._busy_streams():                      # a participant is mid-sentence: do not talk over them
                 g.waiting_floor = True
                 self.metrics.inc("floor_waits")
                 g.timer = self._spawn(self._floor_timer(g), "floor")
@@ -577,6 +606,8 @@ class LiveVoiceEngine:
                 self._finish_gate(g, "denied", "hold_timeout")   # fail silent
 
     async def _on_turn_complete(self, ev: TurnComplete) -> None:
+        if self.text_sink is not None and self._turn_text.strip():
+            self.text_sink("turn", self._turn_text)          # what the gate saw for this turn (debugging only, opt-in)
         await self._handle_control(True)
         g = self._gates.get(ev.response_id)
         if g is not None:
@@ -597,6 +628,8 @@ class LiveVoiceEngine:
         if g.first_audio_at:
             self.metrics.observe("live_response_ms", (self.clock() - g.first_audio_at) * 1000)
         if g.state == "allowed" and g.text:
+            if g.origin == "participant":
+                self.participation.note_reply()          # opens the follow-up window (when it is switched on)
             self.working.add_turn("Tara", g.text)
             self._behaviour_note_response(g.text)
         self._st(ResponseEnded(f"r{g.rid}", "completed" if g.state == "allowed" else "failed"))
@@ -750,7 +783,7 @@ class LiveVoiceEngine:
         if self.expressions is not None and not self.playback.is_playing and not self.takeover_active \
                 and analyze_signals(self._turn_text).addressed_by_name:
             self.expressions.emit(Expression.THINKING)
-        if self._active_streams:
+        if self._busy_streams():
             return
         for g in list(self._gates.values()):
             if g.waiting_floor and g.state == "allowed":
@@ -764,6 +797,9 @@ class LiveVoiceEngine:
         except asyncio.CancelledError:
             return
         if g.waiting_floor and g.state == "allowed":
+            if not self._busy_streams():                           # what looked like talking was stale or steady noise: speak
+                self._flush(g)
+                return
             g.waiting_floor = False
             self.metrics.inc("floor_wait_timeouts")
             self._finish_gate(g, "denied", "floor_timeout")        # the moment passed: stay quiet
@@ -1131,7 +1167,9 @@ class LiveVoiceEngine:
                 except asyncio.CancelledError:
                     raise
                 except ProviderError:
-                    await asyncio.sleep(self.p.reconnect_backoff_s * (2 ** attempt))
+                    if handle is not None:
+                        self._resume = None          # a handle that cannot reconnect is stale: the next attempt starts fresh (and re-seeds)
+                    await asyncio.sleep(min(self.p.reconnect_backoff_max_s, self.p.reconnect_backoff_s * (2 ** attempt)))
                     continue
                 self._session = new
                 self._session_gen += 1
@@ -1140,7 +1178,9 @@ class LiveVoiceEngine:
                 self._spawn(self._downlink(new, self._session_gen), "downlink")
                 if handle is None:
                     try:
-                        await new.send_context(self.working.render())     # fresh session: re-seed from OUR memory
+                        seed = self.working.render()
+                        if seed:
+                            await new.send_context(seed)                  # fresh session: re-seed from OUR memory
                         if self._last_guidance:
                             await new.send_context(self._last_guidance)
                     except Exception:  # noqa: BLE001

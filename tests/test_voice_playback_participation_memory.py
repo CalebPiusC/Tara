@@ -181,8 +181,10 @@ def test_working_memory_is_bounded_and_renders_newest():
     w = WorkingMemory(max_turns=3, summary="we discussed X")
     for i in range(10):
         w.add_turn("A", f"turn {i}")
-    assert len(w.turns) == 3 and "turn 9" in w.render() and "turn 0" not in w.render() and "discussed X" in w.render()
-    assert len(WorkingMemory().render()) < 100
+    recent = w.render().split("Recent conversation:\n", 1)[1]
+    assert len(w.turns) == 3 and "turn 9" in recent and "turn 0" not in recent and "discussed X" in w.render()
+    assert "turn 0" in w.render()                                              # older turns survive as a short digest
+    assert WorkingMemory().render() == ""
 
 
 def test_meeting_memory_needs_provenance_and_is_scope_isolated():

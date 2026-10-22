@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Run Tara locally with one command.
-#   ./dev.sh              speakers (mic muted while Tara talks)
-#   ./dev.sh --headphones full duplex, you can interrupt her
-#   ./dev.sh --quiet      hide debug counters
-#   ./dev.sh --section NAME   a section is a chat of numbered meetings; each run is its next meeting
-#   ./dev.sh --transcripts  also print what Tara heard and said (to see mishearings)
-#   ./dev.sh --type standup  meeting type: general, standup, one_on_one, retro, client_call, brainstorm
-#   ./dev.sh interview new "Name"        create an interview (GitHub, CV, questions) and get a code
-#   ./dev.sh meet check|login|join <link> --interview <code>   Tara joins a real Google Meet (see docs/GOOGLE_MEET_BOT.md)
-#   ./dev.sh interview list              prepared interviews and results
-#   ./dev.sh interview run <code>        Tara runs that interview (you play the candidate when testing)
-#   ./dev.sh --list       list sections and meetings with dates
+# Run Tara locally with one command. The meeting is the main way to use her.
+#
+#   ./dev.sh                         MEETING: asks for the Google Meet link (Enter reuses the last one), then joins with
+#                                    --audio devices --half-duplex --transcripts --model-wake
+#   ./dev.sh <link or code> [flags]  same, without the question; extra flags are passed on (e.g. --record, --reply-to-all)
+#   ./dev.sh meet join <link> ...    the same thing spelled out, with every flag under your control
+#   ./dev.sh meet check|login|probe  set up and inspect the bot (docs/GOOGLE_MEET_BOT.md)
+#
+#   ./dev.sh interview new "Name"    create an interview (GitHub, CV, questions) and get a code
+#   ./dev.sh interview list          prepared interviews and results
+#   ./dev.sh interview run <code>    run that interview on this computer (you play the candidate when testing)
+#   ./dev.sh interview run <code> --meet   run it inside a Google Meet (asks for the link)
+#
+#   ./dev.sh local [flags]           talk to Tara on this computer only, no meeting:
+#       --headphones  --quiet  --transcripts  --section NAME  --type standup  --list
 # Reads keys from .env; never prints them.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -19,6 +22,28 @@ cd "$(dirname "$0")"
 [ -x .venv/bin/python ] || { echo "Missing .venv. Run: python3.13 -m venv .venv && .venv/bin/pip install -e '.[dev,live,audio,memory,work]'"; exit 1; }
 
 set -a; source .env; set +a
+
+MEET_DEFAULTS=(--audio devices --half-duplex --transcripts --model-wake)
+LAST_LINK_FILE="work/meet/last-link"
+
+launch() { if [ -n "${TARA_DRY_RUN:-}" ]; then echo "$@"; exit 0; fi; exec "$@"; }   # TARA_DRY_RUN=1 only prints the command
+
+ask_link() {
+  local last="" answer=""
+  [ -f "$LAST_LINK_FILE" ] && last="$(cat "$LAST_LINK_FILE")"
+  if [ -n "$last" ]; then read -r -p "Which meeting? Paste the Google Meet link or code [Enter = $last]: " answer
+  else read -r -p "Which meeting? Paste the Google Meet link or code: " answer; fi
+  LINK="${answer:-$last}"
+  [ -n "$LINK" ] || { echo "No meeting given."; exit 2; }
+  mkdir -p "$(dirname "$LAST_LINK_FILE")"; printf '%s' "$LINK" > "$LAST_LINK_FILE"
+}
+
+# the meeting is the main way in: no arguments, or a link/code first
+case "${1:-}" in
+  "" | http*://* | meet.google.com/* | [a-z][a-z][a-z]-[a-z][a-z][a-z][a-z]-[a-z][a-z][a-z])
+    if [ $# -eq 0 ]; then ask_link; else LINK="$1"; shift; mkdir -p "$(dirname "$LAST_LINK_FILE")"; printf '%s' "$LINK" > "$LAST_LINK_FILE"; fi
+    launch .venv/bin/python -m tara.meet.run join "$LINK" "${MEET_DEFAULTS[@]}" "$@" ;;
+esac
 
 # google meet bot (see docs/GOOGLE_MEET_BOT.md)
 if [ "${1:-}" = "meet" ]; then
@@ -39,10 +64,14 @@ if [ "${1:-}" = "interview" ]; then
   case "$sub" in
     new)  exec .venv/bin/python -m tara.hiring.wizard new "$@" ;;
     list) exec .venv/bin/python -m tara.hiring.wizard list ;;
-    run)  code="${1:?usage: ./dev.sh interview run <code> [--headphones]}"; shift
+    run)  code="${1:?usage: ./dev.sh interview run <code> [--meet | --headphones]}"; shift
+          if [ "${1:-}" = "--meet" ]; then
+            shift; ask_link
+            launch .venv/bin/python -m tara.meet.run join "$LINK" "${MEET_DEFAULTS[@]}" --interview "$code" "$@"
+          fi
           mode="--speaker"; [ "${1:-}" = "--headphones" ] && mode="--headphones"
           exec .venv/bin/python -m tara.voice.demo --interview "$code" $mode --debug ;;
-    *)    echo "usage: ./dev.sh interview new \"Name\" | list | run <code> [--headphones]"; exit 2 ;;
+    *)    echo "usage: ./dev.sh interview new \"Name\" | list | run <code> [--meet | --headphones]"; exit 2 ;;
   esac
 fi
 
@@ -56,6 +85,7 @@ if [ "${TARA_MEMORY_ENABLED:-0}" = "1" ]; then
   .venv/bin/python -m tara.memory.migrate >/dev/null
 fi
 
+[ "${1:-}" = "local" ] && shift
 MODE="--speaker"; DEBUG="--debug"; MEETING=(); TRANSCRIPTS=""; TYPE=()
 while [ $# -gt 0 ]; do
   case "$1" in

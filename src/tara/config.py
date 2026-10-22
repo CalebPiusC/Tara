@@ -80,6 +80,7 @@ class MeetingConfig:
     retain_audio: bool = False
     approved_knowledge_ids: tuple[str, ...] = ()
     no_commitments: tuple[str, ...] = ()
+    wake_by_model: bool = False          # standby: the model itself judges whether it was called by name (the transcript often misses the name)
     lead_interview: bool = False         # Tara leads: a candidate's turn (reliable identity) is always answered; style of a 1:1 interview
     schema: str = SCHEMA
 
