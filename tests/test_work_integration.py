@@ -444,3 +444,87 @@ async def test_finalize_is_quiet_when_nothing_happened_or_disabled(tmp_path):
     work2, _ = make_work(tmp_path, memory=InMemoryMeetingMemory())
     work2.settings = WorkSettings(enabled=True, dir=str(tmp_path / "work"), auto_minutes=False)
     assert await work2.finalize() == {}
+
+
+def test_a_repeated_document_request_reuses_the_running_job_and_the_room_is_told_when_it_is_ready(tmp_path):
+    async def go():
+        told = []
+
+        async def speak(text):
+            told.append(text)
+        work, ex = make_work(tmp_path, speak=speak)
+        authorize(work)
+        first = await acall(ex, "create_document", kind="minutes", title="Team sync")
+        again = await acall(ex, "create_document", kind="minutes", title="team sync")
+        assert first.ok and again.ok and again.output["job_id"] == first.output["job_id"]       # said twice, written once
+        assert await work.jobs.drain(10) == 0
+        await asyncio.sleep(0.05)
+        assert told and "is ready" in told[0] and "minutes" in told[0]
+        await work.close()
+    asyncio.run(go())
+
+
+def test_closing_gives_a_document_in_progress_a_moment_to_finish_then_cuts_it(tmp_path):
+    async def go():
+        from tara.jobs import JobBoard
+        board = JobBoard()
+        done = []
+
+        async def slow():
+            await asyncio.sleep(0.2)
+            done.append(1)
+        board.start("o", "x", slow)
+        assert await board.drain(2) == 0 and done == [1]                                      # finished within the grace period
+        board.start("o", "y", lambda: asyncio.sleep(30))
+        assert await board.drain(0.1) == 1                                                    # too slow: reported, then close() cuts it
+        await board.close()
+    asyncio.run(go())
+
+
+def test_jobs_cut_off_by_a_restart_are_reported_next_time_but_a_live_run_is_not_disturbed(tmp_path):
+    import json
+    import os
+
+    from tara.jobs import JobBoard
+    journal = tmp_path / "jobs-open.json"
+    journal.write_text(json.dumps({"999999999": {"ab12": "document:minutes:team"}, str(os.getpid() + 0): {"zz": "document:x"}}))
+    board = JobBoard(journal=journal)
+    assert board.interrupted == ["document"]                       # the dead process's job is reported once...
+    assert "999999999" not in json.loads(journal.read_text())      # ...and forgotten
+    assert JobBoard(journal=journal).interrupted == []             # not reported twice
+
+    async def go():
+        b = JobBoard(journal=journal)
+        b.start("o", "document:minutes:t", lambda: asyncio.sleep(0.05))
+        assert str(os.getpid()) in json.loads(journal.read_text())  # an open job is recorded while it runs
+        await b.drain(2)
+        await asyncio.sleep(0.01)
+        assert str(os.getpid()) not in json.loads(journal.read_text())
+    asyncio.run(go())
+
+
+def test_a_research_task_that_ends_reports_once_and_a_cancel_does_not():
+    from tara.orchestration.research import ResearchTaskManager
+
+    class Svc:
+        async def run(self, query, max_sources=None, max_chars=None):
+            if query == "boom":
+                raise RuntimeError("x")
+            if query == "slow":
+                await asyncio.sleep(5)
+            return object()
+
+    async def go():
+        seen = []
+        from tara.orchestration.contracts import ResearchContext
+        m = ResearchTaskManager(Svc(), ResearchContext("s", "t", "m"), max_tasks=3)
+        m.on_done = lambda status, q, err: seen.append((status, q, err))
+        await m.create("fine")
+        await m.create("boom")
+        slow = await m.create("slow")
+        await asyncio.sleep(0.1)
+        await m.cancel(slow.id)
+        await asyncio.sleep(0.1)
+        assert sorted(seen) == [("completed", "fine", ""), ("failed", "boom", "research_failed")]
+        await m.close()
+    asyncio.run(go())

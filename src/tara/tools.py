@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ class ToolExecutor:
         self.metrics = metrics or Metrics()
         self.audit: list[dict[str, Any]] = []
         self._approved: set[str] = set()
+        self._stuck: dict[str, threading.Event] = {}     # tools whose worker thread outlived a timeout (a thread cannot be killed)
 
     def approve(self, call_id: str) -> None:
         """Human approval for a call that returned pending_approval."""
@@ -120,20 +122,37 @@ class ToolExecutor:
         d = self._reg.get(call.name)
         if d is None:
             return self._deny(call, call_id, "not_registered")
-        err = self._check_args(d, call.args)
+        args = self._coerce(d, call.args)
+        err = self._check_args(d, args)
         if err:
             return self._deny(call, call_id, f"bad_args:{err}")
+        if args is not call.args:
+            call = ToolCall(call.name, args)
         if grant.requires_human_approval and call_id not in self._approved:
             return self._deny(call, call_id, "pending_approval", pending=True)
+        stuck = self._stuck.get(call.name)
+        if stuck is not None:
+            if not stuck.is_set():                       # the last call is still running in its thread: do not pile another on top
+                return self._finish(call, call_id, time.perf_counter(), "busy", error="tool_busy", retryable=True)
+            self._stuck.pop(call.name, None)
         t0 = time.perf_counter()
+        finished = threading.Event()
         try:
             if inspect.iscoroutinefunction(d.handler):
                 res = await asyncio.wait_for(d.handler(**call.args), d.timeout_s)
             else:
-                res = await asyncio.wait_for(asyncio.to_thread(d.handler, **call.args), d.timeout_s)
+                def in_thread() -> Any:
+                    try:
+                        return d.handler(**call.args)
+                    finally:
+                        finished.set()
+                res = await asyncio.wait_for(asyncio.to_thread(in_thread), d.timeout_s)
                 if inspect.isawaitable(res):
                     res = await asyncio.wait_for(res, d.timeout_s)
         except TimeoutError:
+            if not finished.is_set() and not inspect.iscoroutinefunction(d.handler):
+                self._stuck[call.name] = finished
+                self.metrics.inc("tool_threads_stuck")
             return self._finish(call, call_id, t0, "timeout", error="tool_timeout", retryable=True)
         except asyncio.CancelledError:
             raise
@@ -157,6 +176,7 @@ class ToolExecutor:
         ms = (time.perf_counter() - t0) * 1000
         self.audit.append({"call_id": call_id, "tool": call.name, "outcome": outcome, "ms": round(ms, 1),
                            "retryable": retryable})
+        del self.audit[:-1000]                                  # bounded: a long meeting must not grow this forever
         self.metrics.observe(f"tool_ms.{call.name}", ms)
         if error:
             self.metrics.inc("tool_failures")
@@ -164,8 +184,35 @@ class ToolExecutor:
 
     def _deny(self, call: ToolCall, call_id: str, why: str, pending: bool = False) -> ToolResult:
         self.audit.append({"call_id": call_id, "tool": call.name, "outcome": why})
+        del self.audit[:-1000]
         self.metrics.inc("tool_denied")
         return ToolResult(False, error=why, pending_approval=pending)
+
+    @staticmethod
+    def _coerce(d: ToolDef, args: dict[str, Any]) -> dict[str, Any]:
+        """Models are loose about argument types ("30" for a number, 12 for a name). Fix only the unambiguous cases, so a tool call a
+        person would call obviously right is not refused; anything else still fails the strict check."""
+        allowed = {**d.required, **d.optional}
+        out = dict(args)
+        changed = False
+        for k, v in args.items():
+            want = allowed.get(k)
+            if want is str and isinstance(v, int | float) and not isinstance(v, bool):
+                out[k] = str(v)
+                changed = True
+            elif want in (int, float) and isinstance(v, str):
+                try:
+                    out[k] = want(v.strip())
+                    changed = True
+                except ValueError:
+                    pass
+            elif want is int and isinstance(v, float) and v.is_integer():
+                out[k] = int(v)
+                changed = True
+            elif want is bool and isinstance(v, str) and v.strip().lower() in ("true", "false"):
+                out[k] = v.strip().lower() == "true"
+                changed = True
+        return out if changed else args
 
     @staticmethod
     def _check_args(d: ToolDef, args: dict[str, Any]) -> str | None:

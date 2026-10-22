@@ -56,6 +56,7 @@ Nothing needs to be said for the meeting itself to be kept: the recorder stores 
 | "This is a stand-up" / "set the meeting type to retro" | `set_meeting_type` (general, standup, one_on_one, retro, client_call, brainstorm) | Same |
 | "Remember that Kubernetes is spelled like this" | `add_vocabulary` | Same |
 | "Take the minutes" / "write up the minutes as a PDF" | `create_document`, then `job_status` | Same |
+| "Email me the summary" / "send the minutes as a PDF to my email" | `email_summary` (masked address, asks first, owner allow-list only; needs `TARA_RESEND_API_KEY` and `TARA_EMAIL_TO`, see [EMAIL_DELIVERY](EMAIL_DELIVERY.md)) | Same |
 | "What have we agreed?" / "what did we say about pricing?" | `meeting_recap`, `recall_meeting` | Same |
 
 Unprompted, Tara also: greets a continuing section with what was left open (opening brief), and gives time nudges when an agenda with a length is set. Both go through the normal speaking gate.
@@ -152,7 +153,6 @@ These belong to the Google Meet connection and the dashboard. They are listed so
 | `./dev.sh --meet <meeting url or code>` | terminal | (superseded by `./dev.sh meet join`, built, not yet run in a real Meet) |
 | `./dev.sh interview new` (Meet step) | terminal | the code it prints becomes a Google Meet link with Tara already waiting inside |
 | `./dev.sh --calendar` | terminal | list today's meetings from the calendar and start Tara in one |
-| "Tara, email me the summary" | voice | planned: confirms the address, sends the minutes as a document to the owner's allow-listed email ([EMAIL_DELIVERY](EMAIL_DELIVERY.md)) |
 | "Tara, who is in the meeting?" | voice | list attendees with names from the roster |
 | "Tara, who said that?" | voice | answer from per-participant attribution, or say it is unknown |
 | `./dev.sh --dashboard` | terminal | start the backend API and the web dashboard |

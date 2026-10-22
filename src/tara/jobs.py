@@ -6,10 +6,13 @@ completion is never reported as completed, and a restart loses in-memory jobs (d
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .metrics import Metrics
@@ -42,13 +45,70 @@ class Job:
         return out
 
 
+def _alive(pid: str) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class JobBoard:
     def __init__(self, *, max_running: int = 2, ttl_s: float = 1800.0, timeout_s: float = 60.0, max_kept: int = 50,
-                 metrics: Metrics | None = None, clock: Callable[[], float] = time.monotonic):
+                 metrics: Metrics | None = None, clock: Callable[[], float] = time.monotonic, journal: Path | None = None):
         self.max_running, self.ttl_s, self.timeout_s, self.max_kept = max_running, ttl_s, timeout_s, max_kept
         self.metrics = metrics or Metrics()
         self._clock = clock
         self._jobs: dict[str, Job] = {}
+        self.journal = journal
+        self.interrupted: list[str] = []          # kinds of jobs a previous run started and never finished (it was restarted or killed)
+        self._recover()
+
+    # A restart loses in-memory jobs. The board writes the jobs it has open to a small file, so the next run can say honestly that
+    # something was cut off (it cannot resume it). Entries are keyed by process id; only dead processes count as interrupted.
+    def _read(self) -> dict[str, dict[str, str]]:
+        if self.journal is None:
+            return {}
+        try:
+            data = json.loads(self.journal.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write(self, data: dict[str, dict[str, str]]) -> None:
+        if self.journal is None:
+            return
+        try:
+            self.journal.parent.mkdir(parents=True, exist_ok=True)
+            self.journal.write_text(json.dumps(data), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _recover(self) -> None:
+        data = self._read()
+        keep: dict[str, dict[str, str]] = {}
+        for pid, jobs in data.items():
+            if pid != str(os.getpid()) and _alive(pid):
+                keep[pid] = jobs                      # another run is still going: not ours to report
+            elif pid != str(os.getpid()):
+                self.interrupted += [k.split(":")[0] for k in jobs.values()]
+        if self.journal is not None:
+            self._write(keep)
+
+    def _journal_set(self, job: Job, open_: bool) -> None:
+        if self.journal is None:
+            return
+        data = self._read()
+        mine = data.setdefault(str(os.getpid()), {})
+        if open_:
+            mine[job.job_id] = job.kind
+        else:
+            mine.pop(job.job_id, None)
+        if not mine:
+            data.pop(str(os.getpid()), None)
+        self._write(data)
 
     @property
     def active(self) -> int:
@@ -75,6 +135,7 @@ class JobBoard:
         self._jobs[job.job_id] = job
         job.task = asyncio.create_task(self._run(job, work), name=f"job:{job.job_id}")
         self.metrics.inc("jobs_started")
+        self._journal_set(job, True)
         return job
 
     async def _run(self, job: Job, work: Callable[[], Awaitable[Any]]) -> None:
@@ -95,6 +156,7 @@ class JobBoard:
             self.metrics.inc("jobs_failed")
         finally:
             job.updated = self._clock()
+            self._journal_set(job, False)
 
     def get(self, owner: str, job_id: str) -> Job | None:
         j = self._jobs.get(job_id)
@@ -109,6 +171,14 @@ class JobBoard:
             return False
         j.task.cancel()
         return True
+
+    async def drain(self, timeout_s: float) -> int:
+        """Let running jobs finish (up to `timeout_s`) before shutdown, so "make the minutes" followed by the end of the meeting does not
+        throw the document away. Returns how many were still running afterwards."""
+        tasks = [j.task for j in self._jobs.values() if j.task is not None and not j.task.done()]
+        if tasks and timeout_s > 0:
+            await asyncio.wait(tasks, timeout=timeout_s)
+        return sum(1 for t in tasks if not t.done())
 
     async def close(self) -> None:
         tasks = [j.task for j in self._jobs.values() if j.task is not None and not j.task.done()]

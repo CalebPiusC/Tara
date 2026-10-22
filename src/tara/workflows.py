@@ -17,6 +17,8 @@ from typing import Any
 from .config import CONTROL_ROLES, MeetingConfig, Role
 from .contracts import LanguageModelProvider
 from .control.state import ControlState
+from .delivery.email import EmailService, EmailSettings, parse_recipients
+from .delivery.template import LOGO_CID, build_minutes_email, load_logo
 from .docgen.composer import KINDS, DocumentComposer, LlmTextGenerator, fallback_markdown
 from .docgen.model import DocStyle, parse_markdown
 from .docgen.store import FORMATS, DocumentStore
@@ -105,9 +107,25 @@ class WorkServices:
         self.settings, self.session_id, self.scope, self.cfg = settings, session_id, scope, cfg
         self.roles, self.names, self.memory, self.working, self.control = roles, names, meeting_memory, working, control
         self.metrics = metrics or Metrics()
+        self._closing = False
+        self._announcing: set[asyncio.Task[None]] = set()
+        self.email: EmailService | None = None
+        try:
+            es = EmailSettings(settings.email_api_key, settings.email_from, parse_recipients(settings.email_to), settings.email_auto,
+                               settings.email_dry_run)
+            if es.configured:
+                self.email = EmailService(es, Path(settings.dir) / "email-audit.jsonl")
+        except ValueError:
+            self.email = None                                    # a bad allow-list turns email off instead of guessing
+        self._email_pending: tuple[int, float] | None = None     # (turn count, time) of the question "shall I send it?"
+        self.guest_source: Callable[[], list[str]] | None = None     # names of everyone seen in a platform meeting, for the minutes
         self.workspace = Workspace(settings.dir)
         self.store = DocumentStore(settings.dir, doc_style(settings))
-        self.jobs = JobBoard(max_running=settings.max_jobs, timeout_s=settings.job_timeout_s, metrics=self.metrics)
+        self.jobs = JobBoard(max_running=settings.max_jobs, timeout_s=settings.job_timeout_s, metrics=self.metrics,
+                             journal=Path(settings.dir) / "jobs-open.json")
+        if self.jobs.interrupted and send_note is not None:
+            send_note(f"{len(self.jobs.interrupted)} background job(s) from the last run were cut off by a restart "
+                      f"({', '.join(sorted(set(self.jobs.interrupted)))}). Ask again if you still need them.")
         self.llm = llm
         self.composer = DocumentComposer(LlmTextGenerator(llm) if llm is not None else None, timeout_s=settings.job_timeout_s - 5)
         self.planner = QuestionPlanner(llm, timeout_s=settings.job_timeout_s - 5)
@@ -326,6 +344,14 @@ class WorkServices:
         self._schedule_question_timer(qid)
         self.metrics.inc("interview_question_clocks_started")
 
+    def _announce(self, text: str) -> None:
+        """Tell the room that background work finished (a person who asked for it should not have to ask again). Never raises."""
+        if self._closing or self.speak is None:
+            return
+        task = asyncio.create_task(self._speak_instruction(f"Tell the participants, in one short sentence: {text}"), name="announce")
+        self._announcing.add(task)
+        task.add_done_callback(self._announcing.discard)
+
     async def _speak_instruction(self, text: str) -> None:
         if self.speak is not None:
             try:
@@ -395,6 +421,8 @@ class WorkServices:
                      list_open_items_tool(self.items), complete_item_tool(self.items, self.memory_gate)]
         if self.settings.documents:
             defs += [self._create_document_tool(), self._job_status_tool()]
+            if self.email is not None:
+                defs.append(self._email_summary_tool())
         if self.settings.hiring:
             defs += [self._list_candidates_tool(), self._get_candidate_tool(), self._prepare_candidate_tool(),
                      self._start_interview_tool(), self._next_question_tool(), self._record_answer_tool(),
@@ -416,11 +444,19 @@ class WorkServices:
                      "an action item, park something for later, or says something is done, call add_action, park_item or "
                      "complete_item. Use list_open_items for \"what is still open\". add_vocabulary saves a name or term the "
                      "participant spells out for you. Report success only when a tool returns it.")
+        if self.jobs.interrupted:
+            lines.append("Earlier background work was cut off by a restart and never finished: " + ", ".join(sorted(set(self.jobs.interrupted)))
+                         + ". Mention this once, briefly, when it fits, and offer to redo it.")
         if self.settings.documents:
             lines.append("To produce a PDF, Word document or minutes, call create_document (kinds: minutes, interview_report, summary, "
                          "custom). It starts a background job: say it has started, then call job_status and report the file name "
                          "(saved in the work/documents folder) only once it says completed. Never claim a document exists before "
                          "that, and never say you will create one without calling create_document.")
+            if self.email is not None:
+                lines.append("To email the minutes to the owner, call email_summary. It first returns confirm_needed with a masked "
+                             "address: say that address and ask if you should send it, wait for a clear yes from the participant, then "
+                             "call email_summary again with confirm=true. You cannot choose or change the address. Say it was sent only "
+                             "when the tool says status sent; if it fails, say what failed.")
         if self.settings.hiring:
             lines.append("You can interview candidates. Use list_candidates and get_candidate to see prepared briefs; prepare_candidate "
                          "builds one from a CV file in the inbox, a portfolio link and a GitHub user. To interview: start_interview, then "
@@ -446,7 +482,7 @@ class WorkServices:
             if result is None or plan is None:
                 raise tool_failure("no_interview", "There is no finished interview to report on yet")
             return result_facts(result, plan, brief)
-        m = collect_minutes(self.memory, self.scope, title=self.cfg.purpose or "Meeting", attendees=self.names.values(),
+        m = collect_minutes(self.memory, self.scope, title=self.cfg.purpose or "Meeting", attendees=self.attendee_names(),
                             working=self.working, excerpt_turns=15)
         facts = minutes_facts(m, include_excerpt=True)
         if self.last_result is not None and kind != "minutes":
@@ -561,6 +597,18 @@ class WorkServices:
             self.metrics.inc("opening_brief_failures")
             return ""
 
+    def attendee_names(self) -> list[str]:
+        """Who was in the meeting: the configured participants plus everyone the platform showed (the generic "You" is dropped when
+        real names are known)."""
+        guests = []
+        if self.guest_source is not None:
+            try:
+                guests = list(self.guest_source())
+            except Exception:  # noqa: BLE001 - the minutes can still be written without it
+                guests = []
+        base = [n for n in self.names.values() if n and not (guests and n == "You")]
+        return list(dict.fromkeys([*base, *guests]))
+
     async def stored_facts(self) -> dict[str, Any]:
         """What the database holds for THIS meeting (earlier sessions included), grouped for a document."""
         svc, scope = self.auto.service, self.auto.memory_scope
@@ -574,7 +622,7 @@ class WorkServices:
         groups = (("Earlier summaries", ("summary",)), ("Recorded decisions", ("decision",)),
                   ("Recorded actions", ("action",)), ("Other recorded facts", ("fact", "preference", "project", "note", "correction")))
         for title, kinds in groups:
-            lines = [(i.text if i.status == "confirmed" else f"{i.text} (unconfirmed)")[:400] for i in items if i.kind in kinds][:12]
+            lines = [_with_owner(i)[:400] for i in items if i.kind in kinds][:12]
             if lines:
                 out[title] = lines
         episodes = [i.text[:600] for i in items if i.kind == "episode"][:4]
@@ -604,12 +652,21 @@ class WorkServices:
                         "written_by_model": composed.used_model, "note": composed.note, "warnings": list(saved.warnings),
                         "font_size": size}
 
+            key = f"document:{kind}:{title.strip().lower()[:60]}"
+            same = next((j for j in self.jobs.list(self.session_id) if j.kind == key and j.state in ("queued", "running")), None)
+            if same is not None:                       # asked twice (people repeat themselves): one document, not two
+                return {"status": "started", "job_id": same.job_id, "note": "this document is already being written; do not start another"}
+
+            async def announce_when_done() -> dict[str, Any]:
+                result = await work()
+                self._announce(f"The {kind} document is ready: {result['file']}. It is saved in the documents folder.")
+                return result
             try:
-                job = self.jobs.start(self.session_id, f"document:{kind}", work)
+                job = self.jobs.start(self.session_id, key, announce_when_done)
             except JobLimitReached as exc:
                 raise tool_failure("busy", str(exc), retryable=True) from exc
             return {"status": "started", "job_id": job.job_id,
-                    "note": "the document is being written; check job_status before saying it is ready"}
+                    "note": "the document is being written; you will be told when it is ready, or check job_status"}
 
         return ToolDef("create_document", {"kind": str, "title": str}, handler, optional={"request": str, "format": str, "interview_id": str},
                        description="Start writing a document from recorded facts: kind is minutes, interview_report, summary or custom; "
@@ -902,6 +959,59 @@ class WorkServices:
                                    "Organizer or recruiter only.",
                        timeout_s=5.0, permission="hiring_write", side_effect=True, live_write=True, category="hiring")
 
+    async def _build_minutes(self, fmt: str) -> Any:
+        """Write the minutes file for what has happened so far. Returns (saved document, minutes) or None when there is nothing yet."""
+        m = collect_minutes(self.memory, self.scope, title=self.cfg.purpose or "Meeting", attendees=self.attendee_names(),
+                            working=self.working)
+        stored = await self.stored_facts()
+        if m.empty and not stored:
+            return None
+        facts = {**minutes_facts(m, include_excerpt=False), **stored}
+        md = fallback_markdown("minutes", f"{m.title} minutes", facts)
+        saved = await asyncio.to_thread(self.store.save, parse_markdown(md, title=f"{m.title} minutes"), fmt)
+        return saved, m, facts
+
+    async def _mail_minutes(self, saved: Any, m: Any, facts: dict[str, Any], *, complete: bool) -> dict[str, Any]:
+        """The designed email: a card with Tara's picture and the headline points, the full document attached."""
+        assert self.email is not None
+        logo = await asyncio.to_thread(load_logo)
+        html, text = build_minutes_email(m.title, facts, saved.name, logo=logo is not None, complete=complete)
+        inline = [(LOGO_CID, "tara.png", logo)] if logo else []
+        return await self.email.send_file(saved.path, f"Minutes: {m.title}", text, html, inline)
+
+    def _email_summary_tool(self) -> ToolDef:
+        async def handler(confirm: bool = False, format: str = "docx") -> dict[str, Any]:
+            self.gate.require("emailing the minutes")
+            assert self.email is not None
+            if format not in ("docx", "pdf"):
+                raise tool_failure("bad_format", "format must be docx or pdf")
+            to = self.email.recipients_masked()
+            now = time.monotonic()
+            if not confirm:
+                self._email_pending = (self.working.total_turns, now)
+                return {"status": "confirm_needed", "to": to,
+                        "say": f"I will email the minutes as a {format} to {', '.join(to)}. Should I send it?"}
+            pend = self._email_pending
+            if pend is None or now - pend[1] > 180 or self.working.total_turns <= pend[0]:
+                raise tool_failure("confirmation_missing", "ask the participant to confirm first, and wait for their answer before "
+                                                           "calling this again with confirm=true")
+            self._email_pending = None
+            built = await self._build_minutes(format)
+            if built is None:
+                raise tool_failure("nothing_to_send", "there is nothing recorded yet to put in the minutes")
+            saved, m, facts = built
+            res = await self._mail_minutes(saved, m, facts, complete=False)
+            if not res.get("ok"):
+                raise tool_failure("email_failed", f"{res.get('error')}. The minutes are saved as {saved.name} in the documents folder.")
+            self.metrics.inc("minutes_emailed")
+            return {"status": "sent" if res["outcome"] == "sent" else "saved_dry_run", "to": res["to"], "file": saved.name}
+
+        return ToolDef("email_summary", {}, handler, optional={"confirm": bool, "format": str},
+                       description="Email the minutes so far as a Word or PDF file to the owner's configured address. Call it first without "
+                                   "confirm to get the masked address, ask the participant to confirm, then call again with confirm=true. "
+                                   "The address cannot be chosen by anyone in the meeting.",
+                       timeout_s=25.0, permission="documents", side_effect=True, live_write=True, category="documents")
+
     async def finalize(self) -> dict[str, Any]:
         """End of meeting: keep a minutes file and one long-term summary, with no request from anyone. Never raises.
 
@@ -916,19 +1026,19 @@ class WorkServices:
         if not self.settings.auto_minutes or not self.auto.active:
             return out
         try:
-            m = collect_minutes(self.memory, self.scope, title=self.cfg.purpose or "Meeting",
-                                attendees=self.names.values(), working=self.working)
-            stored = await self.stored_facts()
-            if m.empty and not stored:
+            built = await self._build_minutes("docx")
+            if built is None:
                 return out
-            facts = {**minutes_facts(m, include_excerpt=False), **stored}
-            md = fallback_markdown("minutes", f"{m.title} minutes", facts)
-            saved = await asyncio.to_thread(self.store.save, parse_markdown(md, title=f"{m.title} minutes"), "docx")
+            saved, m, facts = built
             out["minutes_file"] = saved.name
             self.metrics.inc("auto_minutes_saved")
         except Exception:  # noqa: BLE001 - shutdown must finish
             self.metrics.inc("auto_minutes_failures")
             return out
+        if self.email is not None and self.email.cfg.auto:
+            res = await self._mail_minutes(saved, m, facts, complete=True)
+            out["emailed"] = (f"sent to {', '.join(res['to'])}" if res.get("ok") else f"not sent ({res.get('error')})")   # type: ignore[arg-type]
+            self.metrics.inc("auto_minutes_emailed" if res.get("ok") else "auto_minutes_email_failed")
         try:
             if self.auto.service is not None and self.auto.memory_scope is not None and (m.decisions or m.actions):
                 lines = [f"Decision: {_line(r)}" for r in m.decisions] + [f"Action: {_line(r)}" for r in m.actions]
@@ -943,11 +1053,25 @@ class WorkServices:
         return out
 
     async def close(self) -> None:
+        self._closing = True
+        for t in list(self._announcing):
+            t.cancel()
+        left = await self.jobs.drain(self.settings.close_grace_s)      # a document still being written gets a moment to finish
+        if left:
+            self.metrics.inc("jobs_cut_at_close", left)
         self._cancel_question_timer()
         self._question_awaiting_playback = ""
         if self._clock_task is not None:
             self._clock_task.cancel()
         await self.jobs.close()
+
+
+def _with_owner(i: Any) -> str:
+    """A stored fact as one line for the minutes: owner and deadline for actions, and a mark when nobody confirmed it."""
+    meta = i.metadata or {}
+    extra = [f"{k}: {meta[k]}" for k in ("owner", "deadline") if meta.get(k)]
+    text = i.text + (f" ({'; '.join(extra)})" if extra else "")
+    return text if i.status == "confirmed" else f"{text} (unconfirmed)"
 
 
 def text_llm_from_settings(api_key: str, model: str, timeout_s: float = 30.0) -> LanguageModelProvider | None:

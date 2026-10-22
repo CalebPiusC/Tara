@@ -75,6 +75,8 @@ class MeetAdapter:
         self._pump: asyncio.Task[None] | None = None
         self._seq = itertools.count(1)
         self._t0 = time.monotonic()
+        self.seen_people: dict[str, None] = {}        # everyone who was ever in the room (for the minutes), in order
+        self._talk_log: list[tuple[float, frozenset[str]]] = []   # when the set of people talking changed (best effort, from the call screen)
         self._people: dict[str, str] = {}              # participant id -> name
         self._announced = False
         self._joined = False
@@ -318,7 +320,11 @@ class MeetAdapter:
         assert self.worker is not None
         while True:
             ev: WorkerEvent = await self.worker.events.get()
-            if ev.kind == "participants":
+            if ev.kind == "speaking":
+                self._talk_log.append((time.monotonic(), frozenset(ev.names)))
+                del self._talk_log[:-300]
+                self.log(f"speaking: {', '.join(ev.names) or 'nobody'}")
+            elif ev.kind == "participants":
                 await self._on_people(ev)
             elif ev.state is not None:
                 self._on_state(ev)
@@ -327,6 +333,25 @@ class MeetAdapter:
                     self._finish_stream(clear=False)
                     return
 
+    def speaker_for_turn(self, window_s: float = 10.0, share: float = 0.6) -> str:
+        """Who was talking over the last few seconds, from the call screen: one name when one person clearly held the floor, otherwise
+        "" (unknown). Time-weighted, so a short interjection does not steal a long answer. A best guess, never a certainty."""
+        now = time.monotonic()
+        start = now - window_s
+        weight: dict[str, float] = {}
+        for i, (t, names) in enumerate(self._talk_log):
+            end = self._talk_log[i + 1][0] if i + 1 < len(self._talk_log) else now
+            lo, hi = max(t, start), min(end, now)
+            if hi <= lo or not names:
+                continue
+            for n in names:
+                weight[n] = weight.get(n, 0.0) + (hi - lo) / len(names)     # overlap splits the time between those talking
+        total = sum(weight.values())
+        if total <= 0.5:
+            return ""
+        name, w = max(weight.items(), key=lambda kv: kv[1])
+        return name if w / total >= share else ""
+
     async def _on_people(self, ev: WorkerEvent) -> None:
         for name in ev.left:
             pid = next((p for p, n in self._people.items() if n == name), None)
@@ -334,6 +359,7 @@ class MeetAdapter:
                 del self._people[pid]
                 self._emit(MeetingEventKind.PARTICIPANT_LEFT, {"id": pid})
         for name in ev.joined:
+            self.seen_people.setdefault(name, None)
             pid = self.candidate_stream_id if not self._people and not self._announced else _pid(name)
             self._people[pid] = name
             self._emit(MeetingEventKind.PARTICIPANT_JOINED, {"id": pid, "name": name})

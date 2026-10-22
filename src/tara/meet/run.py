@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from ..config import MeetingConfig
 from ..errors import ConfigError, JoinError, TaraError
@@ -279,6 +280,9 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
     app = LiveTaraApp(settings, cfg, roles, names, adapter, session_id=session_id, scope=scope, bus=bus, user_id="you",
                       interview_code=interview, defer_opening=bool(interview))
     holder["app"] = app
+    app.engine.speaker_hint = adapter.speaker_for_turn
+    if app.work is not None:
+        app.work.guest_source = lambda: list(adapter.seen_people)
     app.engine.participation.follow_up_s = 0.0 if interview or answer_mode == "all" else follow_up_s
     app.engine.p = dataclasses.replace(app.engine.p, adaptive_vad=True, reconnect_attempts=8)       # a call's background noise must not count as someone talking
     if transcripts:
@@ -332,9 +336,20 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
         await asyncio.gather(status, engine_log, return_exceptions=True)
         await app.close()
         _print_interview_result(app)
+        _print_minutes(app)
         log_file.close()
         print(f"Run log saved to {log_path}", flush=True)
     return 0
+
+
+def _print_minutes(app: Any) -> None:
+    f = app.last_finalize
+    if f.get("recorded"):
+        print(f"Notes kept: {f['recorded']}.", flush=True)
+    if f.get("emailed"):
+        print(f"Minutes email: {f['emailed']}.", flush=True)
+    if f.get("minutes_file"):
+        print(f"Minutes saved: {f['minutes_file']} (in the work documents folder).", flush=True)
 
 
 def _parser() -> argparse.ArgumentParser:

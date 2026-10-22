@@ -1,6 +1,20 @@
-# Emailing the meeting summary (designed, not built)
+# Emailing the meeting summary
 
-**Status: designed only. No email code exists.** This page records the plan so it can be built after the multi-person Meet test.
+**Status: implemented with the Resend API and tested offline with a fake HTTP layer and a dry-run mode (`src/tara/delivery/email.py`, tool `email_summary`). No real email has been sent yet.** Provider docs: https://resend.com/docs/api-reference/emails/send-email (accessed 2026-10-22).
+
+## Setup
+Put these in `.env` (the key only ever lives in the environment; nothing here prints it):
+```
+TARA_RESEND_API_KEY=re_...
+TARA_EMAIL_TO=you@example.com        # the allow-list, comma separated; mail goes nowhere else
+TARA_EMAIL_AUTO=0                    # 1 = also mail the minutes when every meeting ends
+TARA_EMAIL_DRY_RUN=0                 # 1 = write to work/email-dry-run instead of sending (try this first)
+TARA_EMAIL_FROM=Tara <onboarding@resend.dev>   # default; without a verified domain Resend only delivers to your own account address
+```
+The email is a designed card with Tara's picture, the headline summary, decisions and action items, and the document attached. Use `TARA_EMAIL_FROM=Tara <hello@appmd.dev>` for a verified-domain sender.
+
+Say "Tara, email me the summary": she says the masked address, asks, waits for a clear yes from a person, then sends. Every attempt is logged to `work/email-audit.jsonl` (masked address, file name, outcome; no content, no key).
+
 
 ## What the owner wants
 1. At the end of a meeting Tara can email the summary or minutes to the owner as a document (DOCX or PDF).
@@ -16,7 +30,7 @@
 - **Failure is spoken and shown**, never silent: "I could not send the email, the document is saved as <name>".
 - Interview reports contain candidate data: they are never emailed automatically, only on an explicit command from the recruiter or organizer.
 
-## Planned pieces
+## How it was built (was: planned pieces)
 | Piece | Notes |
 |---|---|
 | `src/tara/delivery/email.py` | provider-neutral `EmailSender` interface; an SMTP implementation first (stdlib `smtplib`, no new service) |

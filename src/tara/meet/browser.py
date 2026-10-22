@@ -107,6 +107,27 @@ class PlaywrightPage:
         except Exception:  # noqa: BLE001
             return []
 
+    async def speaking(self) -> list[str]:
+        """Names whose entry in the People list shows the speaking indicator (an animated icon). The markup is Meet's own and may change;
+        the signals used are an animation running inside the entry, or a label that says the person is speaking. UNVERIFIED on a
+        real call until the run log shows `speaking:` lines."""
+        script = """(s) => [...document.querySelectorAll(s)].map((e) => {
+          const name = (e.getAttribute('aria-label') || e.innerText || '').split('\\n')[0].trim();
+          let on = false;
+          for (const d of e.querySelectorAll('*')) {
+            const cs = getComputedStyle(d);
+            if (cs.animationName && cs.animationName !== 'none' && cs.animationPlayState !== 'paused') { on = true; break; }
+            const cls = typeof d.className === 'string' ? d.className : '';
+            const lab = ((d.getAttribute('aria-label') || '') + ' ' + cls).toLowerCase();
+            if (/(^|[^a-z])(is )?(speaking|talking)([^a-z]|$)/.test(lab) && !/not speaking/.test(lab)) { on = true; break; }
+          }
+          return [name, on];
+        }).filter((x) => x[0] && x[1]).map((x) => x[0]).slice(0, 10)"""
+        try:
+            return real_names([str(x) for x in await self._p.evaluate(script, sel.PARTICIPANT_ITEMS)])
+        except Exception:  # noqa: BLE001
+            return []
+
     def is_closed(self) -> bool:
         return bool(self._p.is_closed())
 

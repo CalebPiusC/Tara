@@ -11,6 +11,7 @@ import asyncio
 import time
 import urllib.parse
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -124,6 +125,7 @@ class ResearchTaskManager:
         self.metrics = metrics or Metrics()
         self._tasks: dict[str, _Task] = {}
         self._closed = False
+        self.on_done: Callable[[str, str, str], None] | None = None   # (status, query, error) when a task finishes; never for a cancel
 
     async def create(self, query: str, *, max_sources: int = 3, max_chars: int = 8000) -> TaskSnapshot:
         started = time.perf_counter()
@@ -199,6 +201,11 @@ class ResearchTaskManager:
         finally:
             state.updated = time.monotonic()
             self.metrics.observe("research_task_total_ms", (state.updated - state.created) * 1000)
+            if self.on_done is not None and state.status in ("completed", "failed") and not self._closed:
+                try:
+                    self.on_done(state.status, state.query, state.error)
+                except Exception:  # noqa: BLE001 - a notifier problem must not touch the task result
+                    self.metrics.inc("research_notify_failed")
 
     def _snapshot(self, state: _Task, *, include_result: bool) -> TaskSnapshot:
         return TaskSnapshot(id=state.task_id, status=state.status, query=state.query, created_at=state.created,

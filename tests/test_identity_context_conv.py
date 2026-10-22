@@ -342,7 +342,7 @@ def test_tool_not_granted_not_registered_and_bad_args():
     ex, calls = tools(False)
     assert run(ex.execute(ToolCall("send_email", {}), "c1")).error == "not_granted"
     assert run(ex.execute(ToolCall("crm_note", {}), "c2")).error == "bad_args:missing:text"
-    assert run(ex.execute(ToolCall("crm_note", {"text": 5}), "c3")).error == "bad_args:type:text"
+    assert run(ex.execute(ToolCall("crm_note", {"text": ["x"]}), "c3")).error == "bad_args:type:text"
     assert run(ex.execute(ToolCall("crm_note", {"text": "x", "evil": 1}), "c4")).error == "bad_args:unknown:evil"
     assert calls == []
     ex2 = ToolExecutor({}, (ToolSpec("ghost", ""),))
@@ -363,3 +363,43 @@ def test_tool_handler_error_is_reported_not_raised():
     ex, _ = tools(False, boom)
     r = run(ex.execute(ToolCall("crm_note", {"text": "x"}), "c1"))
     assert not r.ok and r.error == "tool_error:RuntimeError" and "secret" not in r.error
+
+
+def test_loose_but_obvious_argument_types_are_fixed_and_the_rest_still_refused():
+    from tara.contracts import ToolCall
+    from tara.tools import ToolDef, ToolExecutor
+    seen = []
+    d = ToolDef("t", {"name": str, "minutes": int}, lambda name, minutes, **k: seen.append((name, minutes)) or "ok", optional={"on": bool, "x": float})
+    ex = ToolExecutor({"t": d}, (ToolSpec("t", "read", False),))
+    assert run(ex.execute(ToolCall("t", {"name": 12, "minutes": "30", "on": "True", "x": "2.5"}), "c1")).ok
+    assert seen == [("12", 30)]
+    assert run(ex.execute(ToolCall("t", {"name": "a", "minutes": 30.0}), "c2")).ok and seen[-1] == ("a", 30)
+    assert run(ex.execute(ToolCall("t", {"name": "a", "minutes": "soon"}), "c3")).error == "bad_args:type:minutes"
+    assert run(ex.execute(ToolCall("t", {"name": "a", "minutes": 30.5}), "c4")).error == "bad_args:type:minutes"
+    assert run(ex.execute(ToolCall("t", {"name": ["a"], "minutes": 3}), "c5")).error == "bad_args:type:name"
+    for i in range(1100):
+        run(ex.execute(ToolCall("t", {"name": "a", "minutes": 1}), f"x{i}"))
+    assert len(ex.audit) <= 1000
+
+
+def test_a_thread_tool_that_outlives_its_timeout_blocks_a_pile_up_until_it_ends():
+    import threading
+
+    from tara.contracts import ToolCall
+    from tara.tools import ToolDef, ToolExecutor
+    release = threading.Event()
+    ran = []
+
+    def slow():
+        ran.append(1)
+        release.wait(5)
+        return "ok"
+    ex = ToolExecutor({"s": ToolDef("s", {}, slow, timeout_s=0.1, side_effect=False)}, (ToolSpec("s", "read", False),))
+
+    async def go():
+        assert (await ex.execute(ToolCall("s", {}), "c1")).error == "tool_timeout"
+        assert (await ex.execute(ToolCall("s", {}), "c2")).error == "tool_busy" and ran == [1]   # no second thread while the first is stuck
+        release.set()
+        await asyncio.sleep(0.2)
+        assert (await ex.execute(ToolCall("s", {}), "c3")).ok and ran == [1, 1]                  # free again once it ended
+    asyncio.run(go())

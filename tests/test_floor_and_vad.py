@@ -192,3 +192,15 @@ def test_working_memory_is_bounded_digests_old_turns_and_frames_the_replay_as_da
     assert sum(len(x) for x in wm.older) <= wm.max_older_chars + len(wm.older)
     assert all(len(t) <= wm.max_turn_chars + 4 for _s, t in wm.turns)
     assert not out.split("Recent conversation:\n", 1)[1].startswith(("ing", "ng"))                # never starts mid-line
+
+
+def test_minutes_list_everyone_seen_and_show_owner_and_deadline():
+    from types import SimpleNamespace
+
+    from tara.workflows import WorkServices, _with_owner
+    item = SimpleNamespace(text="send the budget", status="candidate", metadata={"owner": "Sam", "deadline": "Friday"})
+    assert _with_owner(item) == "send the budget (owner: Sam; deadline: Friday) (unconfirmed)"
+    stub = SimpleNamespace(names={"you": "You"}, guest_source=lambda: ["Sam", "Alex"])
+    assert WorkServices.attendee_names(stub) == ["Sam", "Alex"]                       # real names replace the generic "You"
+    stub = SimpleNamespace(names={"you": "You"}, guest_source=None)
+    assert WorkServices.attendee_names(stub) == ["You"]

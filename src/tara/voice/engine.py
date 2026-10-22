@@ -98,6 +98,7 @@ class LiveParams:
     stale_stream_s: float = 1.0        # a stream that has sent no audio for this long cannot still be talking
     ambient_speech_s: float = 6.0      # one stream "speaking" without a pause this long is background noise, not a sentence
     adaptive_vad: bool = False         # follow the background level (steady noise is not speech); on for the Meet bot
+    slow_tool_s: float = 4.0           # a tool still running after this long and the model silent: have it say it is still working
     floor_wait_ms: int = 2500          # allowed speech waits this long for a participant who is mid-sentence
     guidance_injection: bool = True    # send style notes mid-session (supported per docs; effect unverified)
     leave_grace_s: float = 6.0         # how long a spoken goodbye may take before leaving anyway
@@ -156,6 +157,7 @@ class LiveVoiceEngine:
         self.control = control or ControlState()
         self.memory_gate = memory_gate
         self.transcript_observers, self.turn_observers = transcript_observers, turn_observers
+        self.speaker_hint: Callable[[], str] | None = None           # a platform's best guess at who is talking ("" = unknown)
         self.text_sink: Callable[[str, str], None] | None = None     # opt-in local debugging: ("heard"|"said", text)
         self.identity_image = identity_image
         self._ctrl_done = False
@@ -646,6 +648,11 @@ class LiveVoiceEngine:
         self._behaviour_observe(text, final=True)
         att = att or self._attribution()
         who = self.names.get(att.participant_id or "", None)
+        if self.speaker_hint is not None:
+            try:
+                who = self.speaker_hint() or who             # the call screen knows names; a wrong one is worse than none, so "" falls back
+            except Exception:  # noqa: BLE001 - a hint must never break a turn
+                self.metrics.inc("speaker_hint_failed")
         self.working.add_turn(who or "participant", text)
         self._notify_turn(text, att, who)
         self._st(UtteranceAdded(UtteranceRecord(f"t{self.state.version}", att.participant_id, who, att.confidence, text,
@@ -1066,6 +1073,21 @@ class LiveVoiceEngine:
             self.metrics.inc("live_error_prompt_failed")
 
     # ---- tools -------------------------------------------------------------------------------------------------------
+    async def _slow_tool_watch(self, tool: str) -> None:
+        """While a tool runs, silence sounds like a crash. If nothing has been said for `slow_tool_s`, ask for a short "one moment"."""
+        before = self._latest_rid
+        try:
+            await asyncio.sleep(self.p.slow_tool_s)
+            if self._closing or self._latest_rid != before or self.muted or self.takeover_active or self._session is None:
+                return
+            self.metrics.inc("live_slow_tool_prompts")
+            await self.prompt("A tool you called is still running. Say, in a few words, that you are still working on it and ask them to "
+                              "wait a moment. Do not call another tool.")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - this is a courtesy, never a failure
+            self.metrics.inc("live_slow_tool_prompt_failed")
+
     async def _run_tool(self, req: ToolRequest, gen: int) -> None:
         sess = self._session
         queued_at = time.perf_counter()
@@ -1084,6 +1106,7 @@ class LiveVoiceEngine:
                     self.metrics.observe("live_tool_queue_ms", (time.perf_counter() - queued_at) * 1000)
                     cid = f"live:{self.session_id}:{req.call_id}"
                     self._st(ToolQueued(cid, ToolCall(req.name, {})))
+                    watch = asyncio.create_task(self._slow_tool_watch(req.name), name=f"{self.session_id}:slow-tool")
                     try:
                         if self.memory_gate is not None and self._turn_text.strip():
                             # Input transcription can lag the tool call; use the turn text we have.
@@ -1097,6 +1120,7 @@ class LiveVoiceEngine:
                         else:
                             res = await self.tools.execute_read_only(ToolCall(req.name, req.args), cid)
                     finally:
+                        watch.cancel()
                         self._st(ToolFinished(cid))
                 reason = res.details.get("reason") if isinstance(res.details, dict) else None
                 self._emit("live.tool", tool=req.name, ok=res.ok, error=res.error or "",

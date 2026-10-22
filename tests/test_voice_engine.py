@@ -389,7 +389,7 @@ def test_tool_calls_are_validated_gated_and_results_returned_to_the_model():
             s.push(ToolCallRequested((ToolRequest("1", "lookup", {"query": "refund window"}),
                                       ToolRequest("2", "crm_note", {"text": "x"}),
                                       ToolRequest("3", "secret", {}),
-                                      ToolRequest("4", "lookup", {"query": 5}),
+                                      ToolRequest("4", "lookup", {"query": ["x"]}),
                                       ToolRequest("5", "lookup", {"query": "a", "tenant_id": "other"}))))
             await until(lambda: len(s.tool_results) == 5)
             by = {cid: res for cid, _, res in s.tool_results}
@@ -676,4 +676,40 @@ def test_a_stale_resume_handle_is_dropped_after_one_failure_and_the_next_attempt
             await until(lambda: eng.metrics.counters["live_reconnects"] == 1)
             assert [h for _c, h in prov.opened] == [None, "old-handle", None]            # the stale handle was tried once, then dropped
             assert "budget is ten thousand" in s2.contexts[0]                            # and the fresh session got the conversation back
+    run(go())
+
+
+def test_a_platform_speaker_hint_names_the_turn_in_working_memory_and_falls_back_when_unknown():
+    async def go():
+        s = FakeVoiceSession()
+        eng, _, _, _ = mk(sessions=[s], factor=0.1)
+        hint = {"who": "Sam"}
+        eng.speaker_hint = lambda: hint["who"]
+        async with running(eng):
+            s.push(InputTranscript("we ship on friday", True), TurnComplete(1))
+            await until(lambda: eng.working.total_turns >= 1)
+            hint["who"] = ""
+            s.push(InputTranscript("sounds good to me", True), TurnComplete(2))
+            await until(lambda: eng.working.total_turns >= 2)
+            who = [t[0] for t in eng.working.turns if t[0] != "Tara"]
+            assert who[0] == "Sam" and who[1] != "Sam"
+    run(go())
+
+
+def test_a_slow_tool_with_a_silent_model_gets_a_one_moment_prompt_but_a_fast_one_does_not():
+    async def go():
+        ex, _ = tool_exec(slow=0.5)
+        eng, (s,), _, _ = mk(tools=ex, params=LiveParams(slow_tool_s=0.1, hold_ms=300))
+        async with running(eng):
+            s.push(ToolCallRequested((ToolRequest("1", "lookup", {"query": "refund window"}),)))
+            await until(lambda: eng.metrics.counters["live_slow_tool_prompts"] == 1)
+            assert any("still working" in t for t in s.texts)
+            await until(lambda: len(s.tool_results) == 1)
+        ex2, _ = tool_exec(slow=0.0)
+        eng2, (s2,), _, _ = mk(tools=ex2, params=LiveParams(slow_tool_s=0.3, hold_ms=300))
+        async with running(eng2):
+            s2.push(ToolCallRequested((ToolRequest("1", "lookup", {"query": "x"}),)))
+            await until(lambda: len(s2.tool_results) == 1)
+            await asyncio.sleep(0.4)
+            assert eng2.metrics.counters["live_slow_tool_prompts"] == 0 and not s2.texts
     run(go())

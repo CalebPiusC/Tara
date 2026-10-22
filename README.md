@@ -339,7 +339,7 @@ Tara:  You agreed to send the offer decision by Friday.
 ---
 
 ## What is next
-The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Emailing the summary as a document, by voice or automatically, is planned in [EMAIL_DELIVERY](docs/EMAIL_DELIVERY.md) (not built). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
+The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Emailing the minutes as a document (voice command or automatically at the end, through Resend) is built and tested offline; no real email has been sent yet: [EMAIL_DELIVERY](docs/EMAIL_DELIVERY.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
 
 ---
 

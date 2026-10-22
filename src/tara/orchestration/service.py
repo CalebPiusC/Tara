@@ -98,6 +98,21 @@ class Orchestration:
         return tuple(self._defs)
 
     def instructions(self) -> str:
+        return self._base_instructions() + self._unavailable()
+
+    def _unavailable(self) -> str:
+        """Say plainly what is NOT set up, so a request for it gets an honest answer instead of a guess or silence."""
+        gaps = []
+        if self.search is None:
+            gaps.append("searching the web")
+        if self.research is None:
+            gaps.append("research tasks")
+        if self.weather is None:
+            gaps.append("weather")
+        return (" Not available in this session: " + ", ".join(gaps) + ". If someone asks for one of these, say briefly that it is not "
+                "set up and offer what you can do instead; never make up an answer.") if gaps else ""
+
+    def _base_instructions(self) -> str:
         return (
             "Use the provided tools when the answer depends on current information, exact time or time zones, "
             "weather, a place, arithmetic, or a source you need to check. Do not use them for ordinary conversation "

@@ -109,6 +109,7 @@ class MeetWorker:
         self._seen_n = 0
         self._close: Callable[[], Awaitable[None]] | None = None
         self._task: asyncio.Task[None] | None = None
+        self._talking: tuple[str, ...] = ()
         self._stop = asyncio.Event()
 
     # ---- control -------------------------------------------------------------------------------------------
@@ -296,6 +297,12 @@ class MeetWorker:
                 else:
                     self._seen, self._seen_n = names, 1
                 need = c.people_stable_polls if names else c.people_stable_polls + 1      # an empty list is the most likely flicker
+                speak = getattr(page, "speaking", None)
+                if speak is not None:                                                   # who is talking right now (best effort)
+                    talking = tuple(sorted(n for n in await speak() if "(you)" not in n.lower() and n.strip().lower() != c.bot_name.lower()))
+                    if talking != self._talking:
+                        self._talking = talking
+                        self.events.put_nowait(WorkerEvent("speaking", names=talking))
                 if names != self.people and self._seen_n >= need:
                     joined, left = tuple(sorted(names - self.people)), tuple(sorted(self.people - names))
                     self.people = names

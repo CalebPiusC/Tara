@@ -245,6 +245,29 @@ class LiveTaraApp:
                               max_tool_calls_per_turn=settings.tools.max_calls_per_turn))
         if self.work is not None:
             self._observe_playback_for_interviews()
+        if self.orchestration is not None and self.orchestration.tasks is not None:
+            self.orchestration.tasks.on_done = self._research_finished
+        self._announcements: set[asyncio.Task[None]] = set()
+
+    def _research_finished(self, status: str, query: str, error: str) -> None:
+        """A background research task ended: say so, so nobody has to ask "is it done?". The result itself is read out only on request."""
+        text = (f"Tell the participants, in one short sentence, that the research on \"{query[:80]}\" is finished and you can tell them "
+                "what you found if they want." if status == "completed" else
+                f"Tell the participants, in one short sentence, that the research on \"{query[:80]}\" did not work out"
+                + (" because it ran out of time" if "timeout" in error else "") + ", and offer to try again.")
+        t = asyncio.get_running_loop().create_task(self._announce(text), name="research-announce")
+        self._announcements.add(t)
+        t.add_done_callback(self._announcements.discard)
+
+    async def _announce(self, text: str) -> None:
+        try:
+            if self.engine.status == "active":
+                await self.engine.prompt(text)
+                self.metrics.inc("background_announced")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a missed announcement is not worth an error
+            self.metrics.inc("background_announce_failed")
 
     def _observe_playback_for_interviews(self) -> None:
         """Let the interview clock start when the question audio really finishes.
@@ -325,6 +348,8 @@ class LiveTaraApp:
             self.metrics.inc("opening_brief_failed")
 
     async def close(self) -> None:
+        for t in list(getattr(self, "_announcements", ())):
+            t.cancel()
         if self._catch_up is not None and not self._catch_up.done():
             self._catch_up.cancel()
         if self._opening is not None and not self._opening.done():

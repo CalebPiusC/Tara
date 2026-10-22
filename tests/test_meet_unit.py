@@ -839,3 +839,42 @@ def test_recorder_writes_aligned_valid_wav_files_and_survives_failure(tmp_path):
     bad.room.path = tmp_path / "missing" / "no.wav"            # cannot be opened
     bad.write_room(one_second, 16000)
     assert bad.failed and bad.write_tara(one_second, 16000) is None
+
+
+def test_the_worker_reports_who_is_talking_and_the_adapter_names_the_clear_speaker(tmp_path):
+    async def go():
+        page = FakePage([INCALL], names=["Sam", "Alex"])
+        talking = {"now": ["Sam"]}
+
+        async def speaking():
+            return list(talking["now"])
+        page.speaking = speaking
+        ad, ctrl, status = adapter_for(tmp_path, [page], interview_code="", diag_s=0)
+        await ad.join(MeetingTarget())
+        events: list = []
+        pump = asyncio.create_task(gather(ad, events))
+        await asyncio.sleep(0.5)
+        assert ad.speaker_for_turn(window_s=5) == "Sam"
+        talking["now"] = ["Sam", "Alex"]                                              # overlap: nobody clearly holds the floor
+        await asyncio.sleep(0.5)
+        assert ad.speaker_for_turn(window_s=0.45) == ""
+        assert set(ad.seen_people) == {"Sam", "Alex"}
+        await ad.leave()
+        await pump
+    run(go())
+
+
+def test_speaker_for_turn_is_time_weighted_and_unknown_without_evidence():
+    import time
+    ad = types_stub()
+    now = time.monotonic()
+    ad._talk_log = [(now - 9, frozenset({"Sam"})), (now - 2, frozenset({"Alex"})), (now - 1.5, frozenset())]
+    assert ad.speaker_for_turn(10) == "Sam"                                           # 7 s against 0.5 s
+    assert ad.speaker_for_turn(1) == ""                                               # nobody talked in the last second
+    ad._talk_log = []
+    assert ad.speaker_for_turn(10) == ""
+
+
+def types_stub():
+    from tara.meet.adapter import MeetAdapter
+    return MeetAdapter.__new__(MeetAdapter)

@@ -141,6 +141,7 @@ class WorkSettings:
     pdf_font_bold: str = ""
     pdf_font_italic: str = ""
     job_timeout_s: float = 60.0
+    close_grace_s: float = 20.0               # at shutdown, how long a document still being written may finish
     max_jobs: int = 2
     auto_minutes: bool = True                # at meeting end, save a minutes file and a long-term summary of confirmed items
     auto_record: bool = True                 # keep the meeting automatically: transcript chunks, summary, candidate facts
@@ -150,6 +151,11 @@ class WorkSettings:
     nudges: bool = True                      # spoken time nudges when an agenda with a length is set
     vocab_file: str = ""                      # names and jargon, one per line (empty = <work dir>/vocabulary.txt)
     vocab_terms: str = ""                     # extra comma-separated terms
+    email_to: str = ""                       # owner-configured allow-list for mailing minutes (comma separated); empty = email off
+    email_from: str = "Tara <onboarding@resend.dev>"
+    email_api_key: str = field(default="", repr=False)   # TARA_RESEND_API_KEY, environment only
+    email_auto: bool = False                 # send the minutes when the meeting ends
+    email_dry_run: bool = False              # write the message to work/email-dry-run instead of sending
     recorder_model: str = ""                # fast text model for summaries (empty = TARA_LLM_MODEL); a lite model is faster
     digest_timeout_s: float = 45.0           # how long to wait for a summary at checkpoints and at the end
     chunk_turns: int = 6                     # turns per stored transcript chunk
@@ -333,6 +339,7 @@ class RuntimeSettings:
                 pdf_font_regular=e.get("TARA_PDF_FONT_REGULAR", ""), pdf_font_bold=e.get("TARA_PDF_FONT_BOLD", ""),
                 pdf_font_italic=e.get("TARA_PDF_FONT_ITALIC", ""),
                 job_timeout_s=_num(e, "TARA_JOB_TIMEOUT_S", WorkSettings.job_timeout_s),
+                close_grace_s=_num(e, "TARA_CLOSE_GRACE_S", WorkSettings.close_grace_s),
                 max_jobs=_num(e, "TARA_MAX_JOBS", WorkSettings.max_jobs, int),
                 auto_minutes=_bool(e.get("TARA_AUTO_MINUTES"), True),
                 auto_record=_bool(e.get("TARA_AUTO_RECORD"), True),
@@ -340,6 +347,9 @@ class RuntimeSettings:
                 meeting_type=e.get("TARA_MEETING_TYPE", "general").strip() or "general",
                 opening_brief=_bool(e.get("TARA_OPENING_BRIEF"), True), nudges=_bool(e.get("TARA_NUDGES"), True),
                 vocab_file=e.get("TARA_VOCAB_FILE", "").strip(), vocab_terms=e.get("TARA_VOCAB", ""),
+                email_to=e.get("TARA_EMAIL_TO", "").strip(), email_from=e.get("TARA_EMAIL_FROM", "").strip() or WorkSettings.email_from,
+                email_api_key=e.get("TARA_RESEND_API_KEY", "").strip(), email_auto=_bool(e.get("TARA_EMAIL_AUTO"), False),
+                email_dry_run=_bool(e.get("TARA_EMAIL_DRY_RUN"), False),
                 recorder_model=e.get("TARA_RECORDER_MODEL", "").strip(),
                 digest_timeout_s=_num(e, "TARA_DIGEST_TIMEOUT_S", WorkSettings.digest_timeout_s),
                 chunk_turns=_num(e, "TARA_CHUNK_TURNS", WorkSettings.chunk_turns, int),

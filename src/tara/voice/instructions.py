@@ -36,6 +36,8 @@ def live_system_instruction(cfg: MeetingConfig, names: dict[str, str] | None = N
             "include your name get no reply. When you are called, answer the question around your name directly "
             "(\"what is Kubernetes, Tara\" and \"Tara, what is Kubernetes\" are both questions for you). If you are called with "
             "only your name, say briefly: \"Yes, I'm here. What can I do for you?\"")
+    lines.append("Before you call a tool that may take a moment (a lookup, search, memory, document, email), say a very short natural "
+                 "phrase first, like \"One moment.\" or \"Let me check.\", so nobody wonders if you heard them. Skip it for instant ones.")
     if cfg.no_commitments:
         lines.append("Never commit to: " + ", ".join(cfg.no_commitments) + ".")
     if memory_enabled:
