@@ -13,11 +13,11 @@ import os
 
 import pytest
 
-from tara.orchestration.fetch import SafeFetcher
-from tara.orchestration.http import StdlibHttpClient
-from tara.orchestration.places import CountriesDevProvider, OpenMeteoGeocoder
-from tara.orchestration.search import make_search_provider
-from tara.orchestration.weather import OpenMeteoWeather
+from tara.tools.utility.fetch import SafeFetcher
+from tara.tools.utility.http import StdlibHttpClient
+from tara.tools.utility.places import CountriesDevProvider, OpenMeteoGeocoder
+from tara.tools.utility.search import make_search_provider
+from tara.tools.utility.weather import OpenMeteoWeather
 
 pytestmark = [
     pytest.mark.external,

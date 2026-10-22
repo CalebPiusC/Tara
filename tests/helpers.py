@@ -1,6 +1,6 @@
-from tara.config import AppPolicy, MeetingConfig, Mode, ParticipantSpec, Role, SpeakingPolicy, ToolSpec
-from tara.participation import Attribution, Thresholds, Utterance
-from tara.runtime import MeetingRuntime, State
+from tara.core.config import AppPolicy, MeetingConfig, Mode, ParticipantSpec, Role, SpeakingPolicy, ToolSpec
+from tara.floor.participation import Attribution, Thresholds, Utterance
+from tara.floor.runtime import MeetingRuntime, State
 
 DISCLOSURE = "I am Tara, an AI assistant. This meeting is transcribed."
 TH = Thresholds(min_intent_confidence=0.5, proactive_usefulness=0.7,

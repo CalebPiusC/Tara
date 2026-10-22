@@ -13,9 +13,9 @@ import itertools
 from dataclasses import dataclass, replace
 from datetime import timedelta
 
+from ..core.metrics import Metrics
 from ..memory.models import MemoryScope, utcnow
 from ..memory.service import MemoryService
-from ..metrics import Metrics
 from ..voice.memory import NOTE_KINDS, MeetingMemory, MemoryRecord, Scope
 from ..voice.turns import TurnRecord
 from .tiering import Tier, TierDecision, classify_turn

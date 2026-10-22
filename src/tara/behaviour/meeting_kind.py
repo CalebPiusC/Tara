@@ -12,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
-from ..config import INTERVIEW_MODES, Mode
+from ..core.config import INTERVIEW_MODES, Mode
 
 
 class MeetingKind(str, Enum):

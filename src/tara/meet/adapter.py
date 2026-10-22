@@ -18,10 +18,10 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-from ..audio import AdaptiveGain
-from ..contracts import AdapterCapabilities, DeliveryReceipt, MeetingEvent, MeetingEventKind, MeetingTarget, PCMChunk
-from ..errors import JoinError
-from ..metrics import Metrics
+from ..core.contracts import AdapterCapabilities, DeliveryReceipt, MeetingEvent, MeetingEventKind, MeetingTarget, PCMChunk
+from ..core.errors import JoinError
+from ..core.metrics import Metrics
+from ..floor.audio import AdaptiveGain
 from .bridge import IN_RATE, AudioBridge
 from .controller import InterviewSession, MeetController
 from .recorder import MeetingRecorder

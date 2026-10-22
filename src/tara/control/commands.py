@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
-from ..classify import name_hint
+from ..floor.classify import name_hint
 
 _WORD = re.compile(r"[a-z']+")
 # A name is an address only at the start or after one of these vocatives. "yesterday Tara said ..." is

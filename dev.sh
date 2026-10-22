@@ -5,7 +5,7 @@
 #                                    --audio devices --half-duplex --transcripts --model-wake
 #   ./dev.sh <link or code> [flags]  same, without the question; extra flags are passed on (e.g. --record, --reply-to-all)
 #   ./dev.sh meet join <link> ...    the same thing spelled out, with every flag under your control
-#   ./dev.sh meet check|login|probe  set up and inspect the bot (docs/GOOGLE_MEET_BOT.md)
+#   ./dev.sh meet check|login|probe  set up and inspect the bot (docs/google-meet/GOOGLE_MEET_BOT.md)
 #
 #   ./dev.sh interview new "Name"    create an interview (GitHub, CV, questions) and get a code
 #   ./dev.sh interview list          prepared interviews and results
@@ -19,7 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 [ -f .env ] || { echo "Missing .env. Copy .env.example to .env and fill in the keys."; exit 1; }
-[ -x .venv/bin/python ] || { echo "Missing .venv. Run: python3.13 -m venv .venv && .venv/bin/pip install -e '.[dev,live,audio,memory,work]'"; exit 1; }
+[ -x .venv/bin/python ] || { echo "Missing .venv. Run: make setup"; exit 1; }
 
 set -a; source .env; set +a
 
@@ -45,7 +45,7 @@ case "${1:-}" in
     launch .venv/bin/python -m tara.meet.run join "$LINK" "${MEET_DEFAULTS[@]}" "$@" ;;
 esac
 
-# google meet bot (see docs/GOOGLE_MEET_BOT.md)
+# google meet bot (see docs/google-meet/GOOGLE_MEET_BOT.md)
 if [ "${1:-}" = "meet" ]; then
   sub="${2:-}"; shift 2 || true
   case "$sub" in
@@ -58,7 +58,7 @@ if [ "${1:-}" = "meet" ]; then
   esac
 fi
 
-# interview commands (see docs/INTERVIEWS.md)
+# interview commands (see docs/interviews/INTERVIEWS.md)
 if [ "${1:-}" = "interview" ]; then
   sub="${2:-}"; shift 2 || true
   case "$sub" in

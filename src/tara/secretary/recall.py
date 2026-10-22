@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..tools import ToolDef
+from ..tools.executor import ToolDef
 from ..voice.memory import MeetingMemory, MemoryRecord, Scope, WorkingMemory
 
 _WORD = re.compile(r"[a-z0-9]+")

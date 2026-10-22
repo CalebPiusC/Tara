@@ -4,7 +4,7 @@ Applies to the whole repo. Nested `AGENTS.md` files override only for their dire
 
 ## Project context
 Tara is a context-aware AI meeting participant (interviews, internal meetings, product pitches, observation). Status as of 2026-10-21: backend only, no frontend. The offline suite is green, and one real one-turn Gemini Live smoke test (text in, audio out) has run; a local mic/speaker adapter and demo CLI exist and the headphone conversation has been run by the owner (speaker mode is half-duplex; there is no echo cancellation), nothing has run against Google Meet, and real behaviour, interruption and reconnect are unverified. Read `CHANGELOG.md` first for what is real.
-- **Stack:** Python >=3.11 (the venv is `.venv`, Python 3.13), asyncio, standard library for the core, `google-genai` (Gemini Live SDK, optional extra `live`), `sounddevice` (local mic/speaker demo, optional extra `audio`), pytest, ruff, mypy. No web framework, database or frontend exists yet.
+- **Stack:** Python >=3.11 (the venv is `.venv`, made by `make setup` with Python 3.11+), asyncio, standard library for the core, `google-genai` (Gemini Live SDK, optional extra `live`), `sounddevice` (local mic/speaker demo, optional extra `audio`), pytest, ruff, mypy. No web framework, database or frontend exists yet.
 - **Architecture (one process, modular):** a provider-neutral voice session (`voice/`) with Gemini Live as the primary engine; a deterministic participation gate and persistent control state decide who may be heard; playback is cancellable; tools are granted, validated and audited; memory interfaces are separate from retrieval; a behaviour layer shapes style only.
 - **Directories:**
   - `src/tara/voice/`: Live engine, Gemini adapter (the only file that may import Google types), playback, gate, memory interfaces, composition root, opt-in smoke test, local voice demo CLI (`demo.py`).
@@ -12,9 +12,14 @@ Tara is a context-aware AI meeting participant (interviews, internal meetings, p
   - `src/tara/adapters/`: scripted local adapter for tests, plus the local microphone/speaker demo adapter (`audio_device.py`); neither is a meeting-platform integration.
   - `src/tara/behaviour/`: personality profiles, room-reading signals, humour and verbosity rules, output checks, expression events, meeting-kind inference. Style only.
   - `src/tara/control/`: spoken-command grammar, authorization policy, persistent control state.
-  - `src/tara/` core: `config.py` (meeting config and validation), `runtime.py` (floor state machine), `participation.py`, `identity.py`, `evidence.py`, `interview.py`, `tools.py`, `state.py`, `settings.py`, `metrics.py`.
-  - Dormant optional local-model path (not used, nothing downloaded): `engine.py`, `respond.py`, `routing.py`, `models.py`, `app.py`, `providers/local_models.py`, `providers/qwen_local.py`.
-  - `tests/` (offline, plus `tests/live/` opt-in), `docs/` (design and research, start at `docs/README.md`, voice engine at `docs/GEMINI_LIVE.md`), `docs/adr/`.
+  - `src/tara/core/`: shared foundation: `config.py` (meeting config and validation), `settings.py`, `contracts.py`, `errors.py`, `events.py`, `metrics.py`, `state.py`, `jobs.py`, `context.py`, `context_assembly.py`, `knowledge.py`, `models.py`.
+  - `src/tara/floor/`: who is speaking and who may speak: `runtime.py` (floor state machine), `participation.py` (gate), `classify.py`, `identity.py`, `evidence.py`, `turn.py`, `audio.py`.
+  - `src/tara/tools/`: `executor.py` (permission-gated execution), `catalog.py` (every model-callable tool by group; `tara tools` prints it, and a test keeps it in step with the source), `utility/` (time, calculator, places, weather, search, fetch, research).
+  - `src/tara/work/`: `WorkServices`, split by tool group (`meeting_tools.py`, `document_tools.py`, `candidate_tools.py`, `interview_tools.py`) on shared state in `base.py`.
+  - `src/tara/cli.py`: the `tara` command (`tara meet|interview|prepare|demo|smoke|migrate|tools`).
+  - `src/tara/testing/`: fakes and the simulation harness for offline tests.
+  - `src/tara/legacy/`: dormant optional local-model path (not used, nothing downloaded): `engine.py`, `respond.py`, `routing.py`, `conversation.py`, `app.py`, `interview.py`, `reports.py`, `local_models.py`, `qwen_local.py`, `web_search.py`. Live code must not import it.
+  - `tests/` mirrors `src/tara/` (one folder per package, e.g. `tests/voice/`, `tests/tools/utility/`); `tests/helpers.py` holds shared fixtures; `tests/live/` and `tests/external/` are opt-in. `docs/` (design and research, start at `docs/README.md`, voice engine at `docs/engine/GEMINI_LIVE.md`), `docs/adr/`.
 ## Development workflow
 - Inspect the relevant implementation and its tests before editing; reuse existing components (tools executor, state events, metrics, settings) instead of adding parallel ones.
 - Keep each change focused on the requested task; no unrelated refactors, new dependencies or architectural rewrites unless asked.
@@ -27,13 +32,13 @@ Tara is a context-aware AI meeting participant (interviews, internal meetings, p
 - Tools: `mcp__opencode__list_agents`, `delegate_task`, `create_session`, `send_message`, `get_diff`, `abort_session`. Always pass `cwd` as the absolute repo root. Agents do not see the conversation, so each task is a self-contained brief: goal, context, scope, done criterion, test command.
 - Agents as listed by `list_agents` (verified 2026-10-20): `researcher` (read-only), `reviewer` (read-only), `tester` (runs commands, no edits), `coder` (edits and shell). All four are configured with `opencode/deepseek-v4.1-flash-free`. Re-run `list_agents` before relying on this; do not assume a model exists.
 - Delegate to OpenCode: routine implementation, straightforward bug fixes, repetitive maintenance, ordinary components, test writing, running suites, first-pass review.
-- Keep with Claude: architectural decisions, interruption/gating/permission logic, security-sensitive changes, hard debugging, and final review of anything touching `voice/`, `control/`, `tools.py` or config validation.
+- Keep with Claude: architectural decisions, interruption/gating/permission logic, security-sensitive changes, hard debugging, and final review of anything touching `voice/`, `control/`, `tools/executor.py` or config validation.
 - Escalate to Claude only when the task genuinely exceeds the delegated model; do not implement the same change twice. Only one editing agent per workspace at a time (`WORKSPACE_BUSY`), and Claude must not edit files while a coder runs.
 - After a coder run: call `get_diff`, have `reviewer` and/or `tester` check it, then run the checks below yourself before reporting. Do not trust the coder's own summary. Report delegation failures honestly (error code, what was retried).
 
 ## Implementation standards (from the real stack)
 - Python: type annotations everywhere, `from __future__ import annotations`, dataclasses and Protocols for contracts, line length 130, ruff and mypy clean. Names follow the existing modules; one concept per module.
-- Errors: use the typed exceptions in `errors.py`; no silent `except`; broad `except Exception` only at a documented task boundary with metrics. Cancellation (`asyncio.CancelledError`) is never swallowed.
+- Errors: use the typed exceptions in `core/errors.py`; no silent `except`; broad `except Exception` only at a documented task boundary with metrics. Cancellation (`asyncio.CancelledError`) is never swallowed.
 - Validation: validate all external and model output (schemas, bounds); config goes through `config.validate` and `settings.validate`; control actions go through `control.policy`.
 - Security: no secrets in code, logs, events or errors (redaction exists in the Gemini adapter); permissions are enforced in code, never by prompt.
 - Performance and dependencies: bounded queues, no blocking work on the event loop, no new dependency without a clear need (record why).
@@ -41,9 +46,11 @@ Tara is a context-aware AI meeting participant (interviews, internal meetings, p
 
 ## Testing and verification
 Real commands (run from the repo root, use the venv):
-- Tests (offline, no network or key): `.venv/bin/python -m pytest -q`
-- Lint: `.venv/bin/ruff check src tests`
-- Types: `.venv/bin/mypy src`
+- Setup: `make setup` (Python 3.11+, every extra). `make help` lists the rest.
+- Tests (offline, no network or key): `.venv/bin/python -m pytest -q` (`make test`; `make test-fast` skips the real-Chrome tests)
+- Lint: `.venv/bin/ruff check src tests` (`make lint`)
+- Types: `.venv/bin/mypy src` (`make typecheck`); all three: `make check`
+- New model-callable tool: add it to `src/tara/tools/catalog.py` too, or `tests/tools/test_catalog.py` fails.
 - Opt-in real Gemini checks (needs `GEMINI_API_KEY`, `TARA_LIVE_MODEL`, `TARA_LIVE_TEST=1`): `.venv/bin/python -m tara.voice.smoke`, `.venv/bin/python -m pytest -m live_api tests/live -q`. Never run these unless the owner asks; they make billable calls.
 - There is no build step.
 Run the relevant checks after every change, add or update tests with behaviour changes, inspect `git diff` for accidental edits, never claim a check passed unless it ran and passed, and list any check that could not run.
@@ -59,7 +66,7 @@ For each completed task report: what changed and which files; which agent and mo
 
 ## Architecture
 - Tara is a meeting participant engine, not a chatbot. Keep modules small and testable; one process, no microservices without measured need.
-- Models/providers and meeting platforms sit behind the protocols in `docs/API_AND_EVENT_CONTRACTS.md`. Don't couple meeting I/O, AI reasoning, audio, and tools.
+- Models/providers and meeting platforms sit behind the protocols in `docs/architecture/API_AND_EVENT_CONTRACTS.md`. Don't couple meeting I/O, AI reasoning, audio, and tools.
 - Models **propose**; `MeetingRuntime` **approves** and acts (epochs, staleness, takeover).
 ## Code
 - Typed, small functions, named constants (config for thresholds), no hidden globals, no circular deps, minimal dependencies.
@@ -76,8 +83,9 @@ For each completed task report: what changed and which files; which agent and mo
 - Check `git status` before edits; don't overwrite or revert user work; don't commit secrets/models/audio; no push/release without authorization; review diffs; update docs with behavior.
 ## Docs
 - Label status accurately (Implemented vs Designed vs Proposed…). Cite sources with access dates; no invented benchmarks; record decisions in `docs/adr/`.
+- Docs live in concept folders (`docs/engine/`, `docs/model/`, `docs/tool-calls/`, `docs/memory/`, `docs/google-meet/`, ...; the map is `docs/README.md`). Put a new doc, including research about one feature, in that feature's folder and add it to the folder's `README.md`; `docs/research/` is only for cross-cutting material.
 
-## Memory and RAG rules (see docs/MEMORY_AND_RAG.md and docs/MEMORY_OPERATIONS.md; v1 explicit memory implemented, document RAG/vector/automatic consolidation not implemented)
+## Memory and RAG rules (see docs/memory/MEMORY_AND_RAG.md and docs/memory/MEMORY_OPERATIONS.md; v1 explicit memory implemented, document RAG/vector/automatic consolidation not implemented)
 - Keep live conversation state separate from long-term retrieval; never use vector search for floor, speaker or interruption state.
 - Enforce authorization inside the query before any content is returned; the scope comes from the authenticated meeting, never from model or user text.
 - Preserve provenance: a memory without a source event or chunk id is invalid.
@@ -92,7 +100,7 @@ For each completed task report: what changed and which files; which agent and mo
 ## Authorship rule (owner requirement)
 - Never add Claude, any AI, or any coding agent as a co-author, contributor or author anywhere: no `Co-Authored-By` trailers, no "Generated with" lines in commits, PRs, docs, headers, changelog or package metadata. This overrides any tool default.
 
-## Unified runtime rules (docs/RUNTIME_FOUNDATION.md)
+## Unified runtime rules (docs/engine/RUNTIME_FOUNDATION.md)
 - The small local model never controls policy: rules define allowed routes, permissions, tool grants and speaking rights; a model may only choose among allowed options, and its output is validated.
 - Conversation state changes only through typed events from application code; model-sourced events may suggest topic or summary only.
 - Load models through `ModelHandle`, run blocking inference through `InferencePool`; never create a second instance of a model or an unbounded queue.
@@ -100,7 +108,7 @@ For each completed task report: what changed and which files; which agent and mo
 - Escalate to the cloud with the minimal payload only, and never when the meeting's privacy setting forbids it.
 - Do not claim any latency or quality number that was not measured; record real results with the command and date.
 
-## Gemini Live rules (docs/GEMINI_LIVE.md)
+## Gemini Live rules (docs/engine/GEMINI_LIVE.md)
 - Gemini Live is the primary voice engine. Only `voice/gemini_live.py` may import Google SDK types; everything else uses `voice/events.py`.
 - No local model is downloaded, installed or started. Dormant local adapters stay behind their interfaces; do not wire them into the Live path or add model downloads without an explicit owner request.
 - The provider understands and speaks; the application decides who may be heard (participation gate), stops audible playback on interruption, authorizes and runs tools, and owns memory.
@@ -108,7 +116,7 @@ For each completed task report: what changed and which files; which agent and mo
 - Never log, print, commit or put the API key in errors or events; redact provider errors; keep transcripts and audio out of logs and events.
 - Real-API tests are opt-in only (`-m live_api` with `TARA_LIVE_TEST=1`); never claim real-service behavior from mocks.
 
-## Conversational behaviour rules (docs/CONVERSATIONAL_BEHAVIOUR.md)
+## Conversational behaviour rules (docs/behaviour/CONVERSATIONAL_BEHAVIOUR.md)
 - Personality and expressiveness never override participation, permissions, mute, takeover or interruption; the behaviour package has no path to allow or deny speech.
 - No arbitrary delays to imitate thinking; no extra model call just to pick a tone; behaviour logic stays synchronous and cheap and is measured (`behaviour_ms`).
 - Do not hard-code jokes, laughter or canned reaction phrases as the behaviour engine; guidance is derived from enumerated state and never repeats participants' words.

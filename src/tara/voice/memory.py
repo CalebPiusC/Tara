@@ -1,9 +1,9 @@
-"""Four distinct memory concerns, kept apart on purpose (docs/MEMORY_AND_RAG.md).
+"""Four distinct memory concerns, kept apart on purpose (docs/memory/MEMORY_AND_RAG.md).
 
-1. Live conversation state:  `tara.state.ConversationState` (per session, transient).
+1. Live conversation state:  `tara.core.state.ConversationState` (per session, transient).
 2. Working memory:           `WorkingMemory` (bounded recent turns + summary, per session).
 3. Meeting memory:           `MeetingMemory` Protocol; `InMemoryMeetingMemory` is a stand-in.
-4. Long-term knowledge:      `KnowledgeProvider` (tara.contracts), bound to a session scope by `scoped_search`.
+4. Long-term knowledge:      `KnowledgeProvider` (tara.core.contracts), bound to a session scope by `scoped_search`.
 
 Isolation: everything is keyed by `Scope(tenant_id, meeting_id)`; a store never answers for another scope.
 No database or vector store exists; this is the interface plus an in-memory implementation.
@@ -16,9 +16,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
-from ..contracts import KnowledgeProvider, Passage
-from ..errors import PermissionDenied
-from ..tools import ToolDef
+from ..core.contracts import KnowledgeProvider, Passage
+from ..core.errors import PermissionDenied
+from ..tools.executor import ToolDef
 
 NOTE_KINDS = ("decision", "action_item", "open_question", "summary")
 PROMOTABLE_KINDS = ("decision", "action_item")
@@ -164,8 +164,18 @@ def record_note_tool(memory: MeetingMemory, scope: Scope, active: Callable[[], b
 
 def scoped_search(knowledge: KnowledgeProvider, scope: Scope):
     """Bind retrieval to the session scope. The model never supplies the scope; this closure is what a
-    `search_knowledge` tool calls. Real authorization lives in the retrieval store (docs/MEMORY_AND_RETRIEVAL_SECURITY.md);
+    `search_knowledge` tool calls. Real authorization lives in the retrieval store (docs/memory/MEMORY_AND_RETRIEVAL_SECURITY.md);
     the in-memory provider used today has none and must not hold multi-tenant data."""
     async def search(query: str, k: int = 3) -> list[Passage]:
         return await knowledge.search(query[:300], k)
     return search
+
+
+def knowledge_tool(knowledge: KnowledgeProvider, scope: Scope, timeout_s: float = 5.0) -> ToolDef:
+    """`search_knowledge`: the scope is bound here; the model can only supply a query string."""
+    search = scoped_search(knowledge, scope)
+
+    async def handler(query: str) -> list[dict[str, str]]:
+        return [{"id": p.id, "text": p.text, "source": p.source} for p in await search(query, 3)]
+    return ToolDef("search_knowledge", {"query": str}, handler, description="Search approved company knowledge.",
+                   timeout_s=timeout_s, permission="knowledge_read", side_effect=False)

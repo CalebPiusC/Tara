@@ -19,7 +19,7 @@ import pytest
 from tara.behaviour.checks import flag_text
 from tara.behaviour.persona import persona_instruction
 from tara.behaviour.profiles import Profile
-from tara.settings import RuntimeSettings
+from tara.core.settings import RuntimeSettings
 from tara.voice.events import OutputTranscript, ResponseAudio, TurnComplete, VoiceSessionConfig
 from tara.voice.gemini_live import GeminiLiveProvider
 

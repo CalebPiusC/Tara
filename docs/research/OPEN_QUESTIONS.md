@@ -2,9 +2,9 @@
 
 | ID | Question | How to resolve | Blocks |
 |---|---|---|---|
-| Q1 | Which real Meet path works (browser participant vs vendor bot vs Media API)? | Spike D and E ([GOOGLE_MEET_OPTIONS.md](GOOGLE_MEET_OPTIONS.md)) | Phase 4 |
+| Q1 | Which real Meet path works (browser participant vs vendor bot vs Media API)? | Spike D and E ([GOOGLE_MEET_OPTIONS.md](../google-meet/GOOGLE_MEET_OPTIONS.md)) | Phase 4 |
 | Q2 | Can speaker identity be derived from Meet DOM speaking indicators with useful accuracy? | Measure on recorded test meeting with ground truth | Phase 3/5 |
-| Q3 | Whisper runtime on M4 Pro: mlx-whisper vs whisper.cpp vs faster-whisper CPU int8; latency per VAD segment | Benchmark script ([LOCAL_DEVELOPMENT.md](../LOCAL_DEVELOPMENT.md)) | Phase 2 |
+| Q3 | Whisper runtime on M4 Pro: mlx-whisper vs whisper.cpp vs faster-whisper CPU int8; latency per VAD segment | Benchmark script ([LOCAL_DEVELOPMENT.md](../getting-started/LOCAL_DEVELOPMENT.md)) | Phase 2 |
 | Q4 | Kokoro time-to-first-audio per sentence on MPS vs CPU | Benchmark | Phase 2 |
 | Q5 | Gemini rate limits, latency distribution, data retention terms for the chosen model | Read pricing/terms pages; measure | Phase 2 |
 | Q6 | Is pyannote usable at low latency on M4 Pro, or only offline relabeling? | Benchmark | Phase 3 |

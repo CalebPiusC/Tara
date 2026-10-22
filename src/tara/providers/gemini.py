@@ -16,9 +16,9 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from ..contracts import LlmRequest
-from ..errors import MalformedOutput, ProviderError, ProviderTimeout
-from ..models import Health, ModelState
+from ..core.contracts import LlmRequest
+from ..core.errors import MalformedOutput, ProviderError, ProviderTimeout
+from ..core.models import Health, ModelState
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 RETRYABLE = {429, 500, 502, 503, 504}

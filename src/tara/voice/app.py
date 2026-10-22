@@ -1,6 +1,6 @@
 """LiveTaraApp: composition root for the Gemini Live path (the primary voice path).
 
-The older cascaded path (`tara.app.TaraApp`: STT -> router -> LLM -> TTS) is kept as
+The older cascaded path (`tara.legacy.app.TaraApp`: STT -> router -> LLM -> TTS) is kept as
 optional code and is NOT started here. No local model is loaded or downloaded.
 """
 from __future__ import annotations
@@ -12,14 +12,17 @@ from ..behaviour.controller import BehaviourController
 from ..behaviour.expressions import ExpressionEmitter, ExpressionSink, NullExpressionSink
 from ..behaviour.meeting_kind import MeetingKindTracker
 from ..behaviour.profiles import effective_profile, parse_profile
-from ..classify import IntentClassifier, RuleIntentClassifier
-from ..config import INTERVIEW_MODES, MeetingConfig, Role, ToolSpec
-from ..contracts import KnowledgeProvider, MeetingAdapter
 from ..control.commands import CommandKind
 from ..control.policy import DEFAULT_ENABLED
 from ..control.state import ControlState
-from ..errors import ConfigError
-from ..events import EventBus
+from ..core.config import INTERVIEW_MODES, MeetingConfig, Role, ToolSpec
+from ..core.contracts import MeetingAdapter
+from ..core.errors import ConfigError
+from ..core.events import EventBus
+from ..core.metrics import Metrics
+from ..core.settings import RuntimeSettings, validate
+from ..floor.classify import IntentClassifier, RuleIntentClassifier
+from ..floor.participation import Thresholds, min_confidence
 from ..meetings.types import RULES, parse_type
 from ..memory import (
     MeetingSession,
@@ -27,27 +30,18 @@ from ..memory import (
     MemoryService,
     MemoryWriteGate,
     PostgresMemoryStore,
-    delete_meeting_tool,
-    forget_memory_tool,
-    list_meetings_tool,
-    meeting_lookup_tool,
     meeting_slug,
-    recall_memory_tool,
-    remember_memory_tool,
-    update_memory_tool,
+    memory_tool_grants,
 )
-from ..metrics import Metrics
-from ..orchestration import Orchestration
-from ..orchestration.http import StdlibHttpClient
-from ..participation import Thresholds, min_confidence
-from ..settings import RuntimeSettings, validate
-from ..tools import ToolDef, ToolExecutor
-from ..workflows import WorkServices, text_llm_from_settings
+from ..tools.executor import ToolDef, ToolExecutor
+from ..tools.utility import Orchestration
+from ..tools.utility.http import StdlibHttpClient
+from ..work import WorkServices, text_llm_from_settings
 from .engine import LiveParams, LiveVoiceEngine
 from .events import ToolDecl, VoiceProvider, VoiceSessionConfig
 from .gemini_live import GeminiLiveProvider
 from .instructions import live_system_instruction
-from .memory import InMemoryMeetingMemory, MeetingMemory, Scope, WorkingMemory, record_note_tool, scoped_search
+from .memory import InMemoryMeetingMemory, MeetingMemory, Scope, WorkingMemory, record_note_tool
 from .participation import LiveParticipation
 from .playback import PlaybackController, PlaybackResult
 from .registry import SessionRegistry
@@ -83,16 +77,6 @@ def _add_tool_defs(tools: ToolExecutor | None, definitions: tuple[ToolDef, ...])
                                                       requires_human_approval=False))
         existing.add(definition.name)
     return tools
-
-
-def knowledge_tool(knowledge: KnowledgeProvider, scope: Scope, timeout_s: float = 5.0) -> ToolDef:
-    """`search_knowledge`: the scope is bound here; the model can only supply a query string."""
-    search = scoped_search(knowledge, scope)
-
-    async def handler(query: str) -> list[dict[str, str]]:
-        return [{"id": p.id, "text": p.text, "source": p.source} for p in await search(query, 3)]
-    return ToolDef("search_knowledge", {"query": str}, handler, description="Search approved company knowledge.",
-                   timeout_s=timeout_s, permission="knowledge_read", side_effect=False)
 
 
 class LiveTaraApp:
@@ -165,24 +149,7 @@ class LiveTaraApp:
         if self.memory_service is not None and self.memory_scope is not None and self.memory_gate is not None:
             tools = tools or ToolExecutor({}, ())
             existing = {d["name"] for d in tools.describe()}
-            memory_tools = (
-                (remember_memory_tool(self.memory_service, self.memory_scope, self.memory_gate,
-                                      source=session_id, session_id=session_id),
-                 ToolSpec("remember_memory", "memory", requires_human_approval=False)),
-                (recall_memory_tool(self.memory_service, self.memory_scope),
-                 ToolSpec("recall_memory", "memory", requires_human_approval=False)),
-                (forget_memory_tool(self.memory_service, self.memory_scope, self.memory_gate),
-                 ToolSpec("forget_memory", "memory", requires_human_approval=False)),
-                (update_memory_tool(self.memory_service, self.memory_scope, self.memory_gate,
-                                    source=session_id, session_id=session_id),
-                 ToolSpec("update_memory", "memory", requires_human_approval=False)),
-                (delete_meeting_tool(self.memory_service, self.memory_scope, self.memory_gate, session_id),
-                 ToolSpec("delete_meeting", "memory", requires_human_approval=False)),
-                (list_meetings_tool(self.memory_service, self.memory_scope, session_id),
-                 ToolSpec("list_meetings", "memory", requires_human_approval=False)),
-                (meeting_lookup_tool(self.memory_service, self.memory_scope, session_id),
-                 ToolSpec("meeting_lookup", "memory", requires_human_approval=False)),
-            )
+            memory_tools = memory_tool_grants(self.memory_service, self.memory_scope, self.memory_gate, session_id)
             for definition, grant in memory_tools:
                 if definition.name not in existing:
                     tools.register_and_grant(definition, grant)
@@ -190,7 +157,7 @@ class LiveTaraApp:
         self.work: WorkServices | None = None
         if settings.work.enabled:
             from ..hiring.github import GitHubReader
-            from ..orchestration.fetch import SafeFetcher
+            from ..tools.utility.fetch import SafeFetcher
             fetcher = (self.orchestration.fetcher if self.orchestration is not None and self.orchestration.fetcher is not None
                        else SafeFetcher(user_agent=settings.tools.user_agent, timeout_s=settings.tools.http_timeout_s))
             github = GitHubReader(StdlibHttpClient(user_agent=settings.tools.user_agent), settings.work.github_token,

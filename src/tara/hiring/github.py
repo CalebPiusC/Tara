@@ -10,9 +10,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..errors import ToolError
-from ..orchestration.contracts import HttpClient, HttpResponse
-from ..orchestration.http import clean_text, parse_json
+from ..core.errors import ToolError
+from ..tools.utility.contracts import HttpClient, HttpResponse
+from ..tools.utility.http import clean_text, parse_json
 
 BASE = "https://api.github.com"
 _USER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")

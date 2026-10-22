@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from ..context_assembly import sanitize
-from ..contracts import LanguageModelProvider, LlmRequest
-from ..errors import ProviderError
+from ..core.context_assembly import sanitize
+from ..core.contracts import LanguageModelProvider, LlmRequest
+from ..core.errors import ProviderError
 from .model import Document, parse_markdown
 
 KINDS = ("minutes", "interview_report", "summary", "custom")

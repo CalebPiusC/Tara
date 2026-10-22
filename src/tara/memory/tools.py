@@ -9,8 +9,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from ..errors import PermissionDenied, ToolError
-from ..tools import ToolDef
+from ..core.config import ToolSpec
+from ..core.errors import PermissionDenied, ToolError
+from ..tools.executor import ToolDef
 from .intent import MemoryWriteGate
 from .models import MAX_MEMORY_CHARS, MeetingSession, MemoryItem, MemoryScope
 from .service import MemoryService, span, when
@@ -246,3 +247,19 @@ def update_memory_tool(service: MemoryService, scope: MemoryScope, gate: MemoryW
                     "full wording as text, and either memory_id (from recall_memory) or match (words from the old memory). "
                     "Report success only when status is updated; if ambiguous, ask which one.",
         timeout_s=timeout_s, permission="memory_write", side_effect=True, live_write=True)
+
+
+def memory_tool_grants(service: MemoryService, scope: MemoryScope, gate: MemoryWriteGate,
+                       session_id: str) -> tuple[tuple[ToolDef, ToolSpec], ...]:
+    """Every memory tool for one live session, each with its grant. The scope and gate are bound here, never by the model."""
+    def grant(name: str) -> ToolSpec:
+        return ToolSpec(name, "memory", requires_human_approval=False)
+    return (
+        (remember_memory_tool(service, scope, gate, source=session_id, session_id=session_id), grant("remember_memory")),
+        (recall_memory_tool(service, scope), grant("recall_memory")),
+        (forget_memory_tool(service, scope, gate), grant("forget_memory")),
+        (update_memory_tool(service, scope, gate, source=session_id, session_id=session_id), grant("update_memory")),
+        (delete_meeting_tool(service, scope, gate, session_id), grant("delete_meeting")),
+        (list_meetings_tool(service, scope, session_id), grant("list_meetings")),
+        (meeting_lookup_tool(service, scope, session_id), grant("meeting_lookup")),
+    )

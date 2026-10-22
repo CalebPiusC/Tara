@@ -24,10 +24,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..config import MeetingConfig
-from ..errors import ConfigError, JoinError, TaraError
-from ..settings import RuntimeSettings
-from ..settings import validate as validate_settings
+from ..core.config import MeetingConfig
+from ..core.errors import ConfigError, JoinError, TaraError
+from ..core.settings import RuntimeSettings
+from ..core.settings import validate as validate_settings
 from . import selectors as sel
 from .browser import MAC_CHROME, BrowserConfig, playwright_launcher
 from .controller import DuplicateWorker, MeetController
@@ -127,7 +127,7 @@ async def probe(settings: RuntimeSettings, link: str) -> int:
 def speaking_policy(people: int, mode: str):  # noqa: ANN201 - returns config.SpeakingPolicy
     """Who Tara answers. `auto`: any speech while one other person is here, only her name once there are two or more (several people
     talk to each other, and answering all of it would be rude and confusing). `all` and `address` are fixed."""
-    from ..config import SpeakingPolicy
+    from ..core.config import SpeakingPolicy
     if mode == "all":
         return SpeakingPolicy.PROACTIVE_ALLOWED
     if mode == "address":
@@ -138,7 +138,7 @@ def speaking_policy(people: int, mode: str):  # noqa: ANN201 - returns config.Sp
 def _meet_meeting(reply_to_all: bool, wake_by_model: bool = False) -> MeetingConfig:
     """A normal meeting: the person in the room is the organizer. By default Tara answers any speech (right for a call with one
     person); with several people use address-only so she answers only when called by name."""
-    from ..config import Mode, ParticipantSpec, Role, SpeakingPolicy
+    from ..core.config import Mode, ParticipantSpec, Role, SpeakingPolicy
     return MeetingConfig(
         purpose="Google Meet conversation with Tara", mode=Mode.NATURAL, duration_min=60,
         policy=SpeakingPolicy.PROACTIVE_ALLOWED if reply_to_all else SpeakingPolicy.ON_ADDRESS_ONLY,
@@ -151,9 +151,9 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
                address_only: bool = False, transcripts: bool = False, audio: str = "", half_duplex: bool | None = None,
                reply_to_all: bool = False, camera: bool = True, model_wake: bool = False, record: bool = False, gain: bool = True, follow_up_s: float = 8.0) -> int:
     """Join as Tara. With an interview code she runs that interview; without one it is a normal meeting."""
-    from ..config import AppPolicy, Role
-    from ..config import validate as validate_config
-    from ..events import EventBus
+    from ..core.config import AppPolicy, Role
+    from ..core.config import validate as validate_config
+    from ..core.events import EventBus
     from ..memory import meeting_slug
     from ..voice.app import LiveTaraApp
     from ..voice.demo import _interview_meeting, _print_interview_result, _status_events
@@ -224,7 +224,7 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
         if app is not None and interview:
             await app.say_pending_opening()
 
-    from ..audio import AdaptiveGain
+    from ..floor.audio import AdaptiveGain
     from .adapter import MeetAdapter
 
     def people_changed(count: int) -> None:
@@ -375,7 +375,7 @@ def _parser() -> argparse.ArgumentParser:
     j.add_argument("--no-camera", action="store_true", help="join with the camera off instead of showing Tara's picture")
     j.add_argument("--transcripts", action="store_true", help="print what Tara heard and said on this screen (shows speech)")
     j.add_argument("--audio", choices=("page", "devices"), default="", help="audio route: page (taps in the page) or devices (two virtual "
-                   "audio cables, see docs/GOOGLE_MEET_BOT.md); default TARA_MEET_AUDIO")
+                   "audio cables, see docs/google-meet/GOOGLE_MEET_BOT.md); default TARA_MEET_AUDIO")
     j.add_argument("--half-duplex", action="store_true", default=None, help="silence the meeting audio while Tara speaks, so she cannot hear "
                    "her own voice come back from someone's speaker (use this when a phone or laptop speaker is being used); you cannot "
                    "interrupt her by voice")

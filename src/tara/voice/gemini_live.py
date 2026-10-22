@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack
 from typing import Any
 
-from ..errors import FatalProviderError, ProviderError, ProviderTimeout
+from ..core.errors import FatalProviderError, ProviderError, ProviderTimeout
 from .events import (
     Disconnected,
     GenerationComplete,
