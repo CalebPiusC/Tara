@@ -10,8 +10,8 @@ import time
 from dataclasses import replace
 from datetime import datetime
 
-from ..context_assembly import sanitize
-from ..metrics import Metrics
+from ..core.context_assembly import sanitize
+from ..core.metrics import Metrics
 from .models import (
     MAX_MEMORY_CHARS,
     MEMORY_KINDS,

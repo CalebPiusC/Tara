@@ -18,10 +18,10 @@ import os
 import sys
 from pathlib import Path
 
-from ..orchestration.fetch import SafeFetcher
-from ..orchestration.http import StdlibHttpClient
-from ..settings import RuntimeSettings
-from ..workflows import text_llm_from_settings
+from ..core.settings import RuntimeSettings
+from ..tools.utility.fetch import SafeFetcher
+from ..tools.utility.http import StdlibHttpClient
+from ..work import text_llm_from_settings
 from .github import GitHubReader
 from .intake import CandidateBuilder
 from .planner import QuestionPlanner

@@ -11,10 +11,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..context_assembly import sanitize
-from ..contracts import LanguageModelProvider, LlmRequest
-from ..errors import MalformedOutput, ProviderError, ToolError
-from ..orchestration.fetch import SafeFetcher
+from ..core.context_assembly import sanitize
+from ..core.contracts import LanguageModelProvider, LlmRequest
+from ..core.errors import MalformedOutput, ProviderError, ToolError
+from ..tools.utility.fetch import SafeFetcher
 from .cv import CvError, read_cv, resolve_inside
 from .github import GitHubReader, parse_username
 from .profile import MAX_RAW, CandidateProfile, SourceNote, redact_for_model, slug

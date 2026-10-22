@@ -14,7 +14,7 @@
  * The webaudio and element routes are muted while Tara is speaking, so a page that monitors the microphone can never feed her own voice back.
  *
  * DEVICES MODE (window.__taraMode === "devices", set by Python before this script): the page is pointed at two real virtual audio cables
- * instead (docs/GOOGLE_MEET_BOT.md). The page's speaker is forced to the meeting cable and its microphone to the voice cable; Python
+ * instead (docs/google-meet/GOOGLE_MEET_BOT.md). The page's speaker is forced to the meeting cable and its microphone to the voice cable; Python
  * moves the audio with the sound card API, so none of the taps below are used.
  */
 (() => {

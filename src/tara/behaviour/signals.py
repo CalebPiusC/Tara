@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..classify import name_hint
+from ..floor.classify import name_hint
 
 _R = lambda p: re.compile(p, re.I)  # noqa: E731
 _LAUGH = _R(r"\b(ha(ha)+|hehe+|lol|lmao|rofl)\b|\[laugh|\(laugh|😂|🤣")

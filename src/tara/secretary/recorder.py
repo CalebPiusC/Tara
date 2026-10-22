@@ -18,10 +18,10 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any
 
-from ..context_assembly import sanitize
+from ..core.context_assembly import sanitize
+from ..core.metrics import Metrics
 from ..memory.models import MemoryItem, MemoryScope, normalize_text, tokens, utcnow
 from ..memory.service import MemoryService
-from ..metrics import Metrics
 from ..voice.memory import WorkingMemory
 from .tiering import classify_turn
 

@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..config import INTERVIEW_MODES, Mode
+from ..core.config import INTERVIEW_MODES, Mode
 from .checks import Flag, flag_text, opener_of
 from .meeting_kind import KIND_RULES, MeetingKind, MeetingKindTracker
 from .profiles import EXPRESSIVENESS, HUMOUR, PROFILES, VERBOSITY, Profile, ProfileParams, clamp

@@ -21,9 +21,9 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from ..audio import resample_pcm16
-from ..contracts import AdapterCapabilities, DeliveryReceipt, MeetingEvent, MeetingEventKind, MeetingTarget, PCMChunk
-from ..errors import JoinError
+from ..core.contracts import AdapterCapabilities, DeliveryReceipt, MeetingEvent, MeetingEventKind, MeetingTarget, PCMChunk
+from ..core.errors import JoinError
+from ..floor.audio import resample_pcm16
 
 MIC_RATE = 16000
 OUT_RATE = 24000

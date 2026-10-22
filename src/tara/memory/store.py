@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from ..errors import ConfigError
+from ..core.errors import ConfigError
 from .models import MeetingSession, MemoryHit, MemoryItem, MemoryScope, is_expired, normalize_text, tokens, utcnow
 
 _LIKE_SPECIAL = re.compile(r"([%_\\])")

@@ -44,7 +44,7 @@ Most meeting bots transcribe. Tara takes part. The difference is judgement: a mo
 - **Give her a CV, a GitHub account or a portfolio link.** She reads them and builds interview questions from the role and the candidate's skills.
 - **Runs the interview**, then grades each criterion with a verbatim quote from the candidate as evidence.
 - **Returns a report** that always asks for human review. She never says hire or reject.
-- **Create one from the terminal:** `./dev.sh interview new "Name"`, then `./dev.sh interview run <code>` (add `--meet` to run it in Google Meet) ([INTERVIEWS](docs/INTERVIEWS.md)).
+- **Create one from the terminal:** `./dev.sh interview new "Name"`, then `./dev.sh interview run <code>` (add `--meet` to run it in Google Meet) ([INTERVIEWS](docs/interviews/INTERVIEWS.md)).
 
 ### Documents
 - **PDF, DOCX and Markdown** from an interview, a meeting, or anything you ask for.
@@ -124,9 +124,9 @@ flowchart TB
   DOCT --> FILES
 ```
 
-Memory tools are remember, recall, update, forget and delete meeting. Meeting tools are open items, agenda, recap, meeting type and vocabulary. Lookups are time, weather, public pages and search. Working memory (the last turns, plus a short digest of older ones) is re-seeded to the model after a reconnect, framed as data and never as instructions; a stale resume handle is dropped after one failed try, and reconnecting keeps trying for about a minute. Gemini Live also compresses its own context window (sliding window) so a long call does not end at 15 minutes. Metrics carry no content. Details of each layer are in [SYSTEM_ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md).
+Memory tools are remember, recall, update, forget and delete meeting. Meeting tools are open items, agenda, recap, meeting type and vocabulary. Lookups are time, weather, public pages and search. Working memory (the last turns, plus a short digest of older ones) is re-seeded to the model after a reconnect, framed as data and never as instructions; a stale resume handle is dropped after one failed try, and reconnecting keeps trying for about a minute. Gemini Live also compresses its own context window (sliding window) so a long call does not end at 15 minutes. Metrics carry no content. Details of each layer are in [SYSTEM_ARCHITECTURE](docs/architecture/SYSTEM_ARCHITECTURE.md).
 
-Tara is cloud-backed: audio and transcripts go to Google. Details: [GEMINI_LIVE](docs/GEMINI_LIVE.md), [SYSTEM_ARCHITECTURE](docs/SYSTEM_ARCHITECTURE.md).
+Tara is cloud-backed: audio and transcripts go to Google. Details: [GEMINI_LIVE](docs/engine/GEMINI_LIVE.md), [SYSTEM_ARCHITECTURE](docs/architecture/SYSTEM_ARCHITECTURE.md).
 
 ### One interaction
 ```mermaid
@@ -234,13 +234,18 @@ flowchart TD
 | Area | Code |
 |---|---|
 | Gemini Live adapter and voice contracts | [voice/](src/tara/voice/) |
-| Participation gate, floor, identity | [participation.py](src/tara/participation.py), [voice/participation.py](src/tara/voice/participation.py) |
+| Shared foundation (config, contracts, errors, settings, metrics, state) | [core/](src/tara/core/) |
+| Participation gate, floor, identity | [floor/](src/tara/floor/), [voice/participation.py](src/tara/voice/participation.py) |
 | Behaviour (style only) | [behaviour/](src/tara/behaviour/) |
 | Memory | [memory/](src/tara/memory/), [secretary/](src/tara/secretary/) |
 | Meeting features (open items, agenda, vocabulary, types, brief) | [meetings/](src/tara/meetings/) |
 | Interviews | [hiring/](src/tara/hiring/) |
 | Documents | [docgen/](src/tara/docgen/) |
-| Tools | [tools.py](src/tara/tools.py), [orchestration/](src/tara/orchestration/), [workflows.py](src/tara/workflows.py) |
+| Tools: executor, catalogue (`tara tools`), utility tools | [tools/](src/tara/tools/), [tools/utility/](src/tara/tools/utility/) |
+| Secretary, document and interview tools for a session | [work/](src/tara/work/) |
+| Command line (`tara ...`) | [cli.py](src/tara/cli.py) |
+| Dormant local-model engine (not used live) | [legacy/](src/tara/legacy/) |
+| Fakes and simulation for tests | [testing/](src/tara/testing/) |
 
 ---
 
@@ -250,8 +255,7 @@ You need Python 3.11+ and a Gemini API key from [Google AI Studio](https://aistu
 
 **1. Install**
 ```bash
-python3.13 -m venv .venv
-.venv/bin/pip install -e ".[dev,live,audio,memory,work]"
+make setup        # creates .venv with Python 3.11+ and installs every extra (pip install -e ".[all]")
 ```
 
 **2. Configure.** Copy [.env.example](.env.example) to `.env` (git-ignored) and fill in the keys (every other option has a default; the full list is [env.full.example](env.full.example)):
@@ -271,7 +275,7 @@ createdb tara_memory
 .venv/bin/python -m tara.memory.migrate
 ```
 
-**4. Join a meeting (the main way to use Tara).** One-time setup for the bot's own Google account and the two virtual audio cables is in [GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md). After that:
+**4. Join a meeting (the main way to use Tara).** One-time setup for the bot's own Google account and the two virtual audio cables is in [GOOGLE_MEET_BOT](docs/google-meet/GOOGLE_MEET_BOT.md). After that:
 ```bash
 ./dev.sh                                  # asks "Which meeting?", then joins (Enter reuses the last link)
 ./dev.sh https://meet.google.com/abc-defg-hij   # same, no question
@@ -289,7 +293,7 @@ Tara joins as her own participant, waits to be admitted, and shows her picture a
 ./dev.sh interview run feremi               # or on this computer only (you play the candidate)
 ./dev.sh interview list                     # prepared interviews and results
 ```
-Reports are written to `work/documents`. See [INTERVIEWS](docs/INTERVIEWS.md).
+Reports are written to `work/documents`. See [INTERVIEWS](docs/interviews/INTERVIEWS.md).
 
 **Local only, no meeting.** To talk to Tara on this computer (headphones give the best result; give the section a name to keep its memory separate):
 ```bash
@@ -305,7 +309,7 @@ Say "Tara, ..." to get her attention.
 .venv/bin/ruff check src tests && .venv/bin/mypy src
 ```
 
-More: [LOCAL_DEVELOPMENT](docs/LOCAL_DEVELOPMENT.md), [CONFIGURATION](docs/CONFIGURATION.md), [WORKFLOWS](docs/WORKFLOWS.md).
+More: [LOCAL_DEVELOPMENT](docs/getting-started/LOCAL_DEVELOPMENT.md), [CONFIGURATION](docs/getting-started/CONFIGURATION.md), [WORKFLOWS](docs/meetings/WORKFLOWS.md).
 
 ---
 
@@ -339,7 +343,7 @@ Tara:  You agreed to send the offer decision by Friday.
 ---
 
 ## What is next
-The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/DASHBOARD.md). Emailing the minutes as a document (voice command or automatically at the end, through Resend) is built and tested offline; no real email has been sent yet: [EMAIL_DELIVERY](docs/EMAIL_DELIVERY.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/COMMANDS.md).
+The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/google-meet/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/google-meet/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/product/DASHBOARD.md). Emailing the minutes as a document (voice command or automatically at the end, through Resend) is built and tested offline; no real email has been sent yet: [EMAIL_DELIVERY](docs/meetings/EMAIL_DELIVERY.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/getting-started/COMMANDS.md).
 
 ---
 

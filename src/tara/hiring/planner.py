@@ -8,9 +8,9 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ..context_assembly import sanitize
-from ..contracts import LanguageModelProvider, LlmRequest
-from ..errors import MalformedOutput, ProviderError
+from ..core.context_assembly import sanitize
+from ..core.contracts import LanguageModelProvider, LlmRequest
+from ..core.errors import MalformedOutput, ProviderError
 from .profile import CandidateProfile
 
 MAX_QUESTIONS = 12

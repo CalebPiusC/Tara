@@ -12,8 +12,8 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
-from ..contracts import MeetingAdapter, PCMChunk
-from ..metrics import Metrics
+from ..core.contracts import MeetingAdapter, PCMChunk
+from ..core.metrics import Metrics
 
 _END = object()
 

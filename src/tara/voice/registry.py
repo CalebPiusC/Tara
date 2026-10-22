@@ -1,7 +1,7 @@
 """Bound the number of concurrent voice sessions and refuse duplicate ids."""
 from __future__ import annotations
 
-from ..errors import DuplicateSession, SessionLimitExceeded
+from ..core.errors import DuplicateSession, SessionLimitExceeded
 
 
 class SessionRegistry:

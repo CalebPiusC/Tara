@@ -1,22 +1,28 @@
 # Tara Documentation
 
-Source of truth for product intent: [`../initial.md`](../initial.md). Most of the backend is implemented and tested offline; every doc says its own status. One real one-turn Gemini Live smoke test has run (text in, audio out); a local mic/speaker demo adapter exists and the owner has run a headphone conversation, nothing has run with Google Meet, and live behaviour, interruption and reconnect remain unverified. Read-only orchestration tools (time, location, weather, public pages, bounded research) are implemented; Open-Meteo and countries.dev were checked live, web search (Brave or Tavily) was not (no key). Research date: 2026-10-19; orchestration added 2026-10-20.
-
-## Product
-[PRODUCT_VISION](PRODUCT_VISION.md) · [PRODUCT_REQUIREMENTS](PRODUCT_REQUIREMENTS.md) · [GLOSSARY](GLOSSARY.md)
-## Architecture & design
-[SYSTEM_ARCHITECTURE](SYSTEM_ARCHITECTURE.md) · [COMPONENTS_AND_RESPONSIBILITIES](COMPONENTS_AND_RESPONSIBILITIES.md) · [MEETING_CONTEXT_MODEL](MEETING_CONTEXT_MODEL.md) · [MEETING_RUNTIME](MEETING_RUNTIME.md) · [TURN_TAKING_AND_INTERRUPTION](TURN_TAKING_AND_INTERRUPTION.md) · [PARTICIPANT_IDENTITY](PARTICIPANT_IDENTITY.md) · [SPEAKER_DIARIZATION](SPEAKER_DIARIZATION.md) · [CONVERSATION_ENGINE](CONVERSATION_ENGINE.md) · [AUDIO_PIPELINE](AUDIO_PIPELINE.md) · [AI_PROVIDER_INTEGRATION](AI_PROVIDER_INTEGRATION.md) · [MEETING_PLATFORM_INTEGRATION](MEETING_PLATFORM_INTEGRATION.md) · [API_AND_EVENT_CONTRACTS](API_AND_EVENT_CONTRACTS.md) · [DATA_MODEL](DATA_MODEL.md) · [CONFIGURATION](CONFIGURATION.md)
-## Research
-[GOOGLE_MEET_RESEARCH](GOOGLE_MEET_RESEARCH.md) · [SPEECH_RECOGNITION_RESEARCH](SPEECH_RECOGNITION_RESEARCH.md) · [SPEAKER_IDENTIFICATION_RESEARCH](SPEAKER_IDENTIFICATION_RESEARCH.md) · [VAD_AND_TURN_DETECTION_RESEARCH](VAD_AND_TURN_DETECTION_RESEARCH.md) · [GEMINI_RESEARCH](GEMINI_RESEARCH.md) · [KOKORO_RESEARCH](KOKORO_RESEARCH.md) · [REAL_TIME_ARCHITECTURE_RESEARCH](REAL_TIME_ARCHITECTURE_RESEARCH.md) · [AVATAR_RESEARCH](AVATAR_RESEARCH.md) · [research/](research/README.md) (sources, comparisons, live-voice reference, open questions)
-## Voice engine (primary)
-[GEMINI_LIVE](GEMINI_LIVE.md): Gemini Live architecture, verified facts, interruption, run steps, status · [ORCHESTRATION](ORCHESTRATION.md): time zones, location, weather, search, pages, bounded research, background tasks · [GOOGLE_MEET_BOT](GOOGLE_MEET_BOT.md): the browser bot that joins a real meeting, how audio is routed, what is and is not verified · [INTERVIEWS](INTERVIEWS.md): create and run an interview from the terminal · [COMMANDS](COMMANDS.md): every voice command, tool and terminal command, with what carries over to Meet · [GOOGLE_MEET_INTEGRATION](GOOGLE_MEET_INTEGRATION.md): phased plan for Meet, speaker identification, calendar, teams, search · [EMAIL_DELIVERY](EMAIL_DELIVERY.md): planned: email the summary as a document, by voice or automatically · [DASHBOARD](DASHBOARD.md): front-end design · [MEETINGS](MEETINGS.md): open items, opening brief, agenda, recap, vocabulary, meeting types · [WORKFLOWS](WORKFLOWS.md): secretary, interviews, documents, resources, limits · [CONVERSATIONAL_BEHAVIOUR](CONVERSATIONAL_BEHAVIOUR.md): personality, profiles, meeting kinds, humour, expression events, floor etiquette · [MEETING_CONTROLS](MEETING_CONTROLS.md): spoken commands, permissions, platform limits, notes
-## Runtime foundation (optional local path)
-[RUNTIME_FOUNDATION](RUNTIME_FOUNDATION.md) (implemented against fakes: routing, state, lifecycle, tools, context assembly, metrics)
-## Memory and RAG
-[MEMORY_AND_RAG](MEMORY_AND_RAG.md) · [MEMORY_OPERATIONS](MEMORY_OPERATIONS.md) · [CONTEXT_ASSEMBLY](CONTEXT_ASSEMBLY.md) · [MEMORY_DATA_MODEL](MEMORY_DATA_MODEL.md) · [MEMORY_AND_RETRIEVAL_SECURITY](MEMORY_AND_RETRIEVAL_SECURITY.md) · [RAG_AND_MEMORY_EVALUATION](RAG_AND_MEMORY_EVALUATION.md) · [research/RAG_TECHNOLOGY_EVALUATION](research/RAG_TECHNOLOGY_EVALUATION.md)
-## Operations & quality
-[SECURITY_AND_PRIVACY](SECURITY_AND_PRIVACY.md) · [FAILURE_MODES](FAILURE_MODES.md) · [TESTING_STRATEGY](TESTING_STRATEGY.md) · [OBSERVABILITY](OBSERVABILITY.md) · [LOCAL_DEVELOPMENT](LOCAL_DEVELOPMENT.md)
-## Planning
-[CHANGELOG](../CHANGELOG.md) · [IMPLEMENTATION_ROADMAP](IMPLEMENTATION_ROADMAP.md) · [ARCHITECTURAL_DECISIONS](ARCHITECTURAL_DECISIONS.md) · [adr/](adr/README.md)
+Product intent: [`../initial.md`](../initial.md). What has actually run, and when: [`../CHANGELOG.md`](../CHANGELOG.md). Every doc states its own status.
 
 Status labels: Implemented · Partially implemented · Designed not implemented · Proposed · Researched not selected · Unverified · Blocked · Future.
+
+## Find it by what you want to know
+
+| I want to... | Folder |
+|---|---|
+| set Tara up, configure it, see every command | [getting-started/](getting-started/README.md) |
+| know what Tara is for and what comes next | [product/](product/README.md) |
+| see how the whole system fits together | [architecture/](architecture/README.md) |
+| understand the conversation engine (Gemini Live, audio, context) | [engine/](engine/README.md) |
+| know which AI models are used and how providers plug in | [model/](model/README.md) |
+| see what tools the model can call and how they run | [tool-calls/](tool-calls/README.md) |
+| know when Tara speaks, waits or gets interrupted | [turn-taking/](turn-taking/README.md) |
+| know how Tara tells who is speaking | [speakers/](speakers/README.md) |
+| change how Tara sounds (personality, humour) | [behaviour/](behaviour/README.md) |
+| understand what Tara remembers between meetings | [memory/](memory/README.md) |
+| use meeting features: agenda, minutes, documents, email | [meetings/](meetings/README.md) |
+| get Tara into a real Google Meet call | [google-meet/](google-meet/README.md) |
+| run a hiring interview | [interviews/](interviews/README.md) |
+| read about the future avatar | [avatar/](avatar/README.md) |
+| see open questions and every cited source | [research/](research/README.md) |
+| see why a decision was made | [adr/](adr/README.md) |
+
+Research about one feature lives in that feature's folder (for example, Meet integration options are in `google-meet/`). `research/` keeps only what cuts across features.

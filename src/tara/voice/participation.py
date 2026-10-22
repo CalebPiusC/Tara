@@ -13,13 +13,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from ..classify import TARA_NAMES, IntentClassifier, name_hint
-from ..config import INTERVIEW_MODES, MeetingConfig, Role, SpeakingPolicy
-from ..contracts import AdapterCapabilities
 from ..control.commands import CommandKind, ControlCommand, parse_command
 from ..control.policy import authorize
 from ..control.state import ControlState
-from ..participation import Attribution, Intent, IntentKind, Thresholds, identity_reliable, min_confidence, takeover_authorized
+from ..core.config import INTERVIEW_MODES, MeetingConfig, Role, SpeakingPolicy
+from ..core.contracts import AdapterCapabilities
+from ..floor.classify import TARA_NAMES, IntentClassifier, name_hint
+from ..floor.participation import (
+    Attribution,
+    Intent,
+    IntentKind,
+    Thresholds,
+    identity_reliable,
+    min_confidence,
+    takeover_authorized,
+)
 
 
 class Verdict(str, Enum):

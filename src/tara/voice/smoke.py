@@ -11,7 +11,7 @@ import os
 import sys
 import time
 
-from ..settings import RuntimeSettings, validate
+from ..core.settings import RuntimeSettings, validate
 from .events import ResponseAudio, SessionReady, TurnComplete, VoiceSessionConfig
 from .gemini_live import GeminiLiveProvider
 

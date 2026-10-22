@@ -9,11 +9,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from ..errors import PermissionDenied, ToolError
+from ..core.errors import PermissionDenied, ToolError
 from ..memory.intent import MemoryWriteGate
 from ..memory.models import MAX_MEMORY_CHARS, MemoryItem, MemoryScope, utcnow
 from ..memory.service import MemoryService, when
-from ..tools import ToolDef
+from ..tools.executor import ToolDef
 
 OPEN, DONE = "open", "done"
 

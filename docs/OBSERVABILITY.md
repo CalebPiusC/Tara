@@ -1,2 +1,0 @@
-# Observability
-Structured JSON logs (event ids, state, epoch, stage latencies, error class); no transcript/audio/keys. Metrics: per-stage latency histograms, queue depths/drops, state durations, interruptions, stale drops, provider error rates, attribution confidence distribution. Traces: per-utterance timeline (see [AUDIO_PIPELINE.md](AUDIO_PIPELINE.md)). Debug mode may add redacted transcript hashes. Status: Designed, not implemented.

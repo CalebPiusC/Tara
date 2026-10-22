@@ -23,7 +23,7 @@ All sources accessed **2026-10-19** via page fetch, summarized by a fetch tool (
 whisper.cpp / Core ML performance on M4 Pro; pyannote on MPS; Kokoro latency on M4 Pro; WebRTC echo/AEC behavior in headless Chrome; Google ToS stance on automated Meet participants; Gemini rate limits and data-retention terms (pages not fetched). See [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
 
 ## Memory and RAG sources (accessed 2026-10-19)
-R1-R7 are listed with what each established in [RAG_TECHNOLOGY_EVALUATION.md](RAG_TECHNOLOGY_EVALUATION.md): pgvector README, PostgreSQL full-text ranking docs, Gemini embeddings docs, bge-small-en-v1.5 and bge-reranker-base model cards, OWASP LLM01, Ragas metrics list. Not fetched: Postgres Row-Level Security docs, RRF paper, any benchmark.
+R1-R7 are listed with what each established in [RAG_TECHNOLOGY_EVALUATION.md](../memory/RAG_TECHNOLOGY_EVALUATION.md): pgvector README, PostgreSQL full-text ranking docs, Gemini embeddings docs, bge-small-en-v1.5 and bge-reranker-base model cards, OWASP LLM01, Ragas metrics list. Not fetched: Postgres Row-Level Security docs, RRF paper, any benchmark.
 
 ## Unified runtime sources (accessed 2026-10-20)
 | # | Source | Established |

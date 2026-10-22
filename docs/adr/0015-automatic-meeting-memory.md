@@ -19,4 +19,4 @@
 
 **Not decided here:** pgvector or embeddings. Semantic ("meaning") search is a later step that needs an evaluation set first (ADR-0009 stays the design). Until then, recall is keyword plus recency, and the summary and extracted facts carry most of the meaning.
 
-**Consequences:** Every meeting is stored without the participant doing anything, so the disclosure and retention rules matter more (docs/SECURITY_AND_PRIVACY.md). A model call happens at checkpoints and at the end, never on the audio path. Quality of extracted facts is unmeasured.
+**Consequences:** Every meeting is stored without the participant doing anything, so the disclosure and retention rules matter more (docs/architecture/SECURITY_AND_PRIVACY.md). A model call happens at checkpoints and at the end, never on the audio path. Quality of extracted facts is unmeasured.

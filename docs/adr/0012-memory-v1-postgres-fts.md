@@ -24,6 +24,6 @@
 - The schema has no ACL tables or RLS; v1 relies on application SQL filtering by `tenant_id` and `user_id`, and the app builds the scope. This is weaker than the target design and must not be described as multi-tenant hardened.
 - No Redis cache; an in-process cache is unnecessary for the current measured use and would add invalidation risk.
 
-**Validation:** `tests/test_memory_postgres.py` runs against a real PostgreSQL database in a throwaway schema and verifies commit, fresh-store recall, tenant/user isolation with canaries, correction provenance, expiry, concurrent writes and failure honesty. The offline suite verifies the service, gate, tools and rendering. No real Gemini tool-calling test has run yet.
+**Validation:** `tests/memory/test_memory_postgres.py` runs against a real PostgreSQL database in a throwaway schema and verifies commit, fresh-store recall, tenant/user isolation with canaries, correction provenance, expiry, concurrent writes and failure honesty. The offline suite verifies the service, gate, tools and rendering. No real Gemini tool-calling test has run yet.
 
 **Revisit when:** a hand-labelled eval shows full-text recall is insufficient; measured recall latency or database load justifies a cache; or a second application process needs shared session state (Redis candidate). At that point add a measured comparison, not a speculative service.

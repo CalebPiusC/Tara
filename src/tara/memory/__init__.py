@@ -34,6 +34,7 @@ from .tools import (
     forget_memory_tool,
     list_meetings_tool,
     meeting_lookup_tool,
+    memory_tool_grants,
     recall_memory_tool,
     remember_memory_tool,
     update_memory_tool,
@@ -43,5 +44,5 @@ __all__ = [
     "DEFAULT_MAX_CONTEXT_CHARS", "InMemoryMemoryStore", "MAX_MEMORY_CHARS", "MEMORY_KINDS", "MEMORY_STATUSES",
     "MeetingSession", "MemoryHit", "is_confirmation", "is_delete_meeting_request", "is_update_request", "MemoryItem", "MemoryScope", "MemoryService", "MemoryStore", "MemoryWriteGate",
     "PostgresMemoryStore", "delete_meeting_tool", "update_memory_tool", "forget_memory_tool", "list_meetings_tool", "meeting_lookup_tool", "is_forget_request", "is_recall_request", "is_remember_request",
-    "meeting_slug", "normalize_text", "recall_memory_tool", "remember_memory_tool", "render_memories", "utcnow",
+    "meeting_slug", "memory_tool_grants", "normalize_text", "recall_memory_tool", "remember_memory_tool", "render_memories", "utcnow",
 ]

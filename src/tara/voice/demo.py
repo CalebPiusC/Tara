@@ -17,13 +17,13 @@ import time
 
 from ..adapters.audio_device import AudioDeviceAdapter
 from ..adapters.output_detect import detect_output
-from ..config import AppPolicy, MeetingConfig, Mode, ParticipantSpec, Role, SpeakingPolicy
-from ..config import validate as validate_config
-from ..errors import JoinError, TaraError
-from ..events import EventBus
+from ..core.config import AppPolicy, MeetingConfig, Mode, ParticipantSpec, Role, SpeakingPolicy
+from ..core.config import validate as validate_config
+from ..core.errors import JoinError, TaraError
+from ..core.events import EventBus
+from ..core.settings import RuntimeSettings
+from ..core.settings import validate as validate_settings
 from ..memory import meeting_slug
-from ..settings import RuntimeSettings
-from ..settings import validate as validate_settings
 from .app import LiveTaraApp
 from .memory import Scope
 

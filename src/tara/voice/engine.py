@@ -20,21 +20,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .. import events as bus_events
-from ..audio import AdaptiveEnergyVad, EnergyVad, Segmenter, SegmentReady, SpeechStarted, resample_pcm16
 from ..behaviour.controller import BehaviourController
 from ..behaviour.expressions import Expression, ExpressionEmitter, emotion_for
 from ..behaviour.signals import analyze as analyze_signals
-from ..config import MeetingConfig, Role
-from ..contracts import ActionOutcome, MeetingAdapter, MeetingEvent, MeetingEventKind, MeetingTarget, PCMChunk, ToolCall
 from ..control.commands import CommandKind, ControlCommand
 from ..control.state import ControlState
-from ..errors import FatalProviderError, ProviderError, SessionLimitExceeded  # noqa: F401
-from ..identity import ParticipantRegistry
-from ..memory.intent import MemoryWriteGate
-from ..metrics import Metrics
-from ..participation import Attribution, identity_reliable, min_confidence
-from ..state import (
+from ..core import events as bus_events
+from ..core.config import MeetingConfig, Role
+from ..core.contracts import ActionOutcome, MeetingAdapter, MeetingEvent, MeetingEventKind, MeetingTarget, PCMChunk, ToolCall
+from ..core.errors import FatalProviderError, ProviderError, SessionLimitExceeded  # noqa: F401
+from ..core.metrics import Metrics
+from ..core.state import (
     ControlChanged,
     ConversationState,
     Interrupted,
@@ -47,7 +43,11 @@ from ..state import (
     UtteranceAdded,
     UtteranceRecord,
 )
-from ..tools import ToolExecutor
+from ..floor.audio import AdaptiveEnergyVad, EnergyVad, Segmenter, SegmentReady, SpeechStarted, resample_pcm16
+from ..floor.identity import ParticipantRegistry
+from ..floor.participation import Attribution, identity_reliable, min_confidence
+from ..memory.intent import MemoryWriteGate
+from ..tools.executor import ToolExecutor
 from .events import (
     Disconnected,
     GenerationComplete,
@@ -204,7 +204,7 @@ class LiveVoiceEngine:
                                           {"session": self.session_id, **data}))
 
     def _st(self, e: StateEvent) -> None:
-        from ..errors import InvalidStateChange
+        from ..core.errors import InvalidStateChange
         try:
             self.state.apply(e)
         except InvalidStateChange:

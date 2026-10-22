@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from ..config import INTERVIEW_MODES, MeetingConfig
+from ..core.config import INTERVIEW_MODES, MeetingConfig
 
 
 class Profile(str, Enum):

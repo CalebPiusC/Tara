@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..errors import JoinError
+from ..core.errors import JoinError
 from . import selectors as sel
 from .bridge import AudioBridge
 from .worker import Launcher, MeetPage

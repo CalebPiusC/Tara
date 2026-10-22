@@ -13,10 +13,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from ..context_assembly import sanitize
-from ..contracts import LanguageModelProvider, LlmRequest
-from ..errors import MalformedOutput, ProviderError
-from ..metrics import Metrics
+from ..core.context_assembly import sanitize
+from ..core.contracts import LanguageModelProvider, LlmRequest
+from ..core.errors import MalformedOutput, ProviderError
+from ..core.metrics import Metrics
 from .planner import Question
 
 CORRECTNESS = ("correct", "mostly_correct", "partially_correct", "incorrect", "valid_alternative", "needs_clarification")

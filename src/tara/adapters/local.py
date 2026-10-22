@@ -1,11 +1,11 @@
 """LocalMeetingAdapter: scripted/in-memory meeting for development and tests.
-Proves nothing about Google Meet (docs/MEETING_PLATFORM_INTEGRATION.md)."""
+Proves nothing about Google Meet (docs/google-meet/MEETING_PLATFORM_INTEGRATION.md)."""
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
 
-from ..contracts import (
+from ..core.contracts import (
     ActionOutcome,
     AdapterCapabilities,
     DeliveryReceipt,
@@ -14,7 +14,7 @@ from ..contracts import (
     MeetingTarget,
     PCMChunk,
 )
-from ..errors import JoinError
+from ..core.errors import JoinError
 
 
 class LocalMeetingAdapter:

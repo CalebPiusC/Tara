@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..errors import ConfigError
+from ..core.errors import ConfigError
 from .worker import parse_meet_link
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ..behaviour.persona import persona_instruction
 from ..behaviour.profiles import Profile
-from ..config import MeetingConfig, Role, SpeakingPolicy
+from ..core.config import MeetingConfig, Role, SpeakingPolicy
 
 
 def live_system_instruction(cfg: MeetingConfig, names: dict[str, str] | None = None,

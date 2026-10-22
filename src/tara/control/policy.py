@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..config import CONTROL_ROLES, INTERVIEW_MODES, MeetingConfig, Role
-from ..contracts import AdapterCapabilities
-from ..participation import Attribution, identity_reliable
+from ..core.config import CONTROL_ROLES, INTERVIEW_MODES, MeetingConfig, Role
+from ..core.contracts import AdapterCapabilities
+from ..floor.participation import Attribution, identity_reliable
 from .commands import CommandKind, ControlCommand
 from .state import ControlState
 
