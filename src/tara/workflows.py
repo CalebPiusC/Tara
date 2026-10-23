@@ -23,10 +23,11 @@ from .core.metrics import Metrics
 from .core.settings import WorkSettings
 from .delivery.email import EmailService, EmailSettings, parse_recipients
 from .delivery.template import LOGO_CID, build_minutes_email, load_logo
-from .docgen.composer import KINDS, DocumentComposer, LlmTextGenerator, fallback_markdown
+from .docgen.composer import DocumentComposer, LlmTextGenerator, fallback_markdown
 from .docgen.model import DocStyle, parse_markdown
 from .docgen.store import FORMATS, DocumentStore
 from .floor.participation import Attribution, identity_reliable
+from .hiring.cv import CvError, read_cv, resolve_inside
 from .hiring.evaluator import AnswerEvaluator
 from .hiring.intake import CandidateBuilder
 from .hiring.interview import (
@@ -38,7 +39,7 @@ from .hiring.interview import (
     result_facts,
 )
 from .hiring.planner import InterviewPlan, Question, QuestionPlanner
-from .hiring.profile import CandidateProfile
+from .hiring.profile import CandidateProfile, redact_for_model
 from .hiring.workspace import Workspace, WorkspaceError, check_id
 from .meetings.agenda import Agenda, MeetingClock
 from .meetings.brief import opening_brief
@@ -52,6 +53,7 @@ from .meetings.items import (
 from .meetings.types import RULES, MeetingType, parse_type
 from .meetings.vocab import Vocabulary
 from .memory.intent import MemoryWriteGate
+from .memory.knowledge import KnowledgeService
 from .memory.models import MeetingSession, MemoryScope
 from .memory.service import MemoryService
 from .secretary.auto_memory import AutoMemory, AutoMemoryConfig, TurnRecord
@@ -60,8 +62,17 @@ from .secretary.recall import RecallNudger, meeting_recap_tool, recall_meeting_t
 from .secretary.recorder import MeetingRecorder, RecorderConfig
 from .tools.executor import ToolDef
 from .tools.utility.fetch import SafeFetcher
+from .tools.utility.research import ResearchService
 from .voice.memory import MeetingMemory, Scope, WorkingMemory
 from .work.support import with_owner as _with_owner
+
+DOCUMENT_SOURCE_MODES = ("meeting", "web_research", "tool_catalog", "approved_knowledge", "provided_material")
+DOCUMENT_LENGTHS = ("brief", "standard", "detailed")
+_PERSONAL_DETAILS_OPT_IN = re.compile(
+    r"\b(?:include|keep|preserve) (?:the )?personal details as (?:written|provided)\b|"
+    r"\bdo not redact (?:the )?(?:personal details|names and contact details)\b", re.I)
+_PERSONAL_DETAILS_OPT_OUT = re.compile(
+    r"\b(?:don't|do not|never) (?:include|keep|preserve) (?:the )?personal details as (?:written|provided)\b", re.I)
 
 
 def tool_failure(code: str, message: str, *, retryable: bool = False) -> ToolError:
@@ -75,12 +86,18 @@ class ControlRoleGate:
     def __init__(self, roles: dict[str, Role], min_conf: float):
         self.roles, self.min_conf = roles, min_conf
         self._ok = False
+        self._personal_details_opt_in = False
 
-    def observe(self, _text: str, att: Attribution) -> None:
+    def observe(self, text: str, att: Attribution) -> None:
         self._ok = identity_reliable(att, self.min_conf) and self.roles.get(att.participant_id or "") in CONTROL_ROLES
+        self._personal_details_opt_in = bool(
+            self._ok and _PERSONAL_DETAILS_OPT_IN.search(text) and not _PERSONAL_DETAILS_OPT_OUT.search(text))
 
     def authorized(self) -> bool:
         return self._ok
+
+    def explicitly_opted_in_to_personal_details(self) -> bool:
+        return self._personal_details_opt_in
 
     def require(self, what: str) -> None:
         if not self._ok:
@@ -98,15 +115,18 @@ class WorkServices:
     def __init__(self, settings: WorkSettings, *, session_id: str, scope: Scope, cfg: MeetingConfig, roles: dict[str, Role],
                  names: dict[str, str], meeting_memory: MeetingMemory, working: WorkingMemory, control: ControlState,
                  min_conf: float, llm: LanguageModelProvider | None = None, fetcher: SafeFetcher | None = None,
-                 github: Any | None = None, memory_service: MemoryService | None = None,
+                 research_service: ResearchService | None = None, github: Any | None = None,
+                 memory_service: MemoryService | None = None, knowledge_service: KnowledgeService | None = None,
                  memory_scope: MemoryScope | None = None, metrics: Metrics | None = None,
                  send_note: Callable[[str], None] | None = None, candidate_speakers: frozenset[str] = frozenset(),
+                 tool_inventory: Callable[[], list[dict[str, Any]]] | None = None,
                  recorder_llm: LanguageModelProvider | None = None, memory_gate: MemoryWriteGate | None = None,
                  speak: Callable[[str], Awaitable[None]] | None = None,
                  on_kind: Callable[[str | None], None] | None = None,
                  monotonic: Callable[[], float] = time.monotonic):
         self.settings, self.session_id, self.scope, self.cfg = settings, session_id, scope, cfg
         self.roles, self.names, self.memory, self.working, self.control = roles, names, meeting_memory, working, control
+        self.memory_scope = memory_scope
         self.metrics = metrics or Metrics()
         self._closing = False
         self._announcing: set[asyncio.Task[None]] = set()
@@ -128,6 +148,9 @@ class WorkServices:
             send_note(f"{len(self.jobs.interrupted)} background job(s) from the last run were cut off by a restart "
                       f"({', '.join(sorted(set(self.jobs.interrupted)))}). Ask again if you still need them.")
         self.llm = llm
+        self.research_service = research_service
+        self.knowledge_service = knowledge_service
+        self.tool_inventory = tool_inventory
         self.composer = DocumentComposer(LlmTextGenerator(llm) if llm is not None else None, timeout_s=settings.job_timeout_s - 5)
         self.planner = QuestionPlanner(llm, timeout_s=settings.job_timeout_s - 5)
         self.builder = CandidateBuilder(self.workspace.inbox, llm, fetcher, github, llm_timeout_s=settings.job_timeout_s - 5)
@@ -421,7 +444,7 @@ class WorkServices:
             defs += [add_action_tool(self.items, self.memory_gate), park_item_tool(self.items, self.memory_gate),
                      list_open_items_tool(self.items), complete_item_tool(self.items, self.memory_gate)]
         if self.settings.documents:
-            defs += [self._create_document_tool(), self._job_status_tool()]
+            defs += [self._create_document_tool(), self._create_document_from_source_tool(), self._job_status_tool()]
             if self.email is not None:
                 defs.append(self._email_summary_tool())
         if self.settings.hiring:
@@ -450,9 +473,18 @@ class WorkServices:
                          + ". Mention this once, briefly, when it fits, and offer to redo it.")
         if self.settings.documents:
             lines.append("To produce a PDF, Word document or minutes, call create_document (kinds: minutes, interview_report, summary, "
-                         "custom). It starts a background job: say it has started, then call job_status and report the file name "
-                         "(saved in the work/documents folder) only once it says completed. Never claim a document exists before "
-                         "that, and never say you will create one without calling create_document.")
+                         "custom). For general document requests, use create_document_from_source and explicitly select the matching "
+                         "source_mode. Available modes for this session: "
+                         + ", ".join(self._document_source_modes()) + ". Never substitute meeting facts for another source mode.")
+            lines.append("Every create_document_from_source request needs a title, audience, purpose, and length (brief, standard, or "
+                         "detailed). If the participant has not supplied an essential brief detail or source selector, ask before "
+                         "calling the tool. Format defaults to docx. For web or approved-knowledge mode provide a topic; for "
+                         "provided_material provide a filename from work/inbox. Personal details in supplied files are redacted by "
+                         "default; preserve them only when the authorized speaker explicitly says 'include personal details as written' "
+                         "and set preserve_personal_details=true. Meeting mode defaults to the current session; set meeting_selector "
+                         "to previous or a meeting number only when explicitly requested. Say the job started, then check job_status and report "
+                         "a file only after completion. Never claim a document exists before job_status says completed, and do not "
+                         "promise a document without starting the matching job.")
             if self.email is not None:
                 lines.append("To email the minutes to the owner, call email_summary. It first returns confirm_needed with a masked "
                              "address: say that address and ask if you should send it, wait for a clear yes from the participant, then "
@@ -610,13 +642,14 @@ class WorkServices:
         base = [n for n in self.names.values() if n and not (guests and n == "You")]
         return list(dict.fromkeys([*base, *guests]))
 
-    async def stored_facts(self) -> dict[str, Any]:
-        """What the database holds for THIS meeting (earlier sessions included), grouped for a document."""
+    async def stored_facts(self, session_id: str | None = None) -> dict[str, Any]:
+        """Return durable facts from exactly one session, grouped for a document."""
         svc, scope = self.auto.service, self.auto.memory_scope
         if svc is None or scope is None:
             return {}
+        session_id = session_id or self.session_id
         try:
-            items = await svc.store.list_recent(scope, 80)
+            items = await svc.session_items(scope, session_id, 120)
         except Exception:  # noqa: BLE001 - a document can still be written from the live notes
             return {}
         out: dict[str, Any] = {}
@@ -634,8 +667,8 @@ class WorkServices:
     def _create_document_tool(self) -> ToolDef:
         async def handler(kind: str, title: str, request: str = "", format: str = "docx", interview_id: str = "") -> dict[str, Any]:
             self.gate.require("creating a document")
-            if kind not in KINDS:
-                raise tool_failure("bad_kind", f"kind must be one of {list(KINDS)}")
+            if kind not in ("minutes", "interview_report", "summary", "custom"):
+                raise tool_failure("bad_kind", "use create_document_from_source for source-based documents")
             if format not in FORMATS:
                 raise tool_failure("bad_format", f"format must be one of {list(FORMATS)}")
             if not title.strip():
@@ -653,26 +686,246 @@ class WorkServices:
                         "written_by_model": composed.used_model, "note": composed.note, "warnings": list(saved.warnings),
                         "font_size": size}
 
-            key = f"document:{kind}:{title.strip().lower()[:60]}"
-            same = next((j for j in self.jobs.list(self.session_id) if j.kind == key and j.state in ("queued", "running")), None)
-            if same is not None:                       # asked twice (people repeat themselves): one document, not two
-                return {"status": "started", "job_id": same.job_id, "note": "this document is already being written; do not start another"}
-
-            async def announce_when_done() -> dict[str, Any]:
-                result = await work()
-                self._announce(f"The {kind} document is ready: {result['file']}. It is saved in the documents folder.")
-                return result
-            try:
-                job = self.jobs.start(self.session_id, key, announce_when_done)
-            except JobLimitReached as exc:
-                raise tool_failure("busy", str(exc), retryable=True) from exc
-            return {"status": "started", "job_id": job.job_id,
-                    "note": "the document is being written; you will be told when it is ready, or check job_status"}
+            return self._start_document_job(kind, title.strip(), work)
 
         return ToolDef("create_document", {"kind": str, "title": str}, handler, optional={"request": str, "format": str, "interview_id": str},
                        description="Start writing a document from recorded facts: kind is minutes, interview_report, summary or custom; "
-                                   "format is docx, pdf or md. Returns a job id immediately. Organizer or recruiter only.",
+                                   "format is docx, pdf or md. Use create_document_from_source for a different source mode. "
+                                   "Returns a job id immediately. Organizer or recruiter only.",
                        timeout_s=5.0, permission="documents", side_effect=True, live_write=True, category="documents", latency="background")
+
+    def _document_source_modes(self) -> tuple[str, ...]:
+        modes = ["meeting", "provided_material"]
+        if self.research_service is not None:
+            modes.append("web_research")
+        if self.tool_inventory is not None:
+            modes.append("tool_catalog")
+        if self.knowledge_service is not None and self.memory_scope is not None:
+            modes.append("approved_knowledge")
+        return tuple(mode for mode in DOCUMENT_SOURCE_MODES if mode in modes)
+
+    def _create_document_from_source_tool(self) -> ToolDef:
+        async def handler(source_mode: str, title: str, audience: str, purpose: str, length: str,
+                          topic: str = "", file_name: str = "", meeting_selector: str = "current",
+                          format: str = "docx", kind: str = "custom",
+                          preserve_personal_details: bool = False) -> dict[str, Any]:
+            self.gate.require("creating a document")
+            modes = self._document_source_modes()
+            if source_mode not in modes:
+                raise tool_failure("source_unavailable", f"source mode must be one of {list(modes)}")
+            if not title.strip():
+                raise tool_failure("bad_title", "give the document a title")
+            if not audience.strip():
+                raise tool_failure("missing_audience", "ask who the document is for")
+            if not purpose.strip():
+                raise tool_failure("missing_purpose", "ask what the document should help the reader do")
+            if length not in DOCUMENT_LENGTHS:
+                raise tool_failure("bad_length", f"length must be one of {list(DOCUMENT_LENGTHS)}")
+            if format not in FORMATS:
+                raise tool_failure("bad_format", f"format must be one of {list(FORMATS)}")
+            if source_mode in ("web_research", "approved_knowledge") and not topic.strip():
+                raise tool_failure("missing_topic", "ask what topic to cover")
+            if source_mode == "provided_material" and not file_name.strip():
+                raise tool_failure("missing_file", "ask which file in the work inbox to use")
+            if preserve_personal_details and source_mode != "provided_material":
+                raise tool_failure("bad_option", "preserve_personal_details applies only to provided_material")
+            if preserve_personal_details and not self.gate.explicitly_opted_in_to_personal_details():
+                raise tool_failure("personal_details_opt_in_required", "the authorized speaker must explicitly ask to include personal details")
+            if source_mode == "meeting" and kind not in ("minutes", "summary", "custom"):
+                raise tool_failure("bad_kind", "meeting documents can be minutes, summary, or custom")
+
+            document_title = title.strip()[:120]
+            topic_text = topic.strip()[:400]
+            brief = {"audience": audience.strip()[:200], "purpose": purpose.strip()[:400], "length": length}
+            job_kind = f"source_document:{source_mode}"
+
+            async def work() -> dict[str, Any]:
+                facts: dict[str, Any] = {"Document brief": brief}
+                references: tuple[tuple[str, str], ...] = ()
+                warnings: list[str] = []
+                document_kind = "research"
+                request = topic_text or purpose.strip()
+
+                if source_mode == "meeting":
+                    target_session_id = self.session_id
+                    selector = meeting_selector.strip().lower()
+                    if selector not in ("", "current"):
+                        service, scope = self.auto.service, self.auto.memory_scope
+                        if service is None or scope is None:
+                            raise tool_failure("meeting_source_unavailable", "meeting history is not configured")
+                        sessions = sorted(await service.sessions(scope), key=lambda meeting: meeting.number)
+                        if selector in ("previous", "last", "latest"):
+                            earlier = [meeting for meeting in sessions if meeting.session_id != self.session_id]
+                            target = earlier[-1] if earlier else None
+                        else:
+                            digits = "".join(char for char in selector if char.isdigit())
+                            target = next((meeting for meeting in sessions
+                                           if digits and meeting.number == int(digits)), None)
+                        if target is None:
+                            raise tool_failure("meeting_not_found", "no earlier meeting matches that selector")
+                        target_session_id = target.session_id
+                    facts.update(await self.stored_facts(target_session_id))
+                    if len(facts) == 1:
+                        raise tool_failure("meeting_source_empty", "there are no recorded meeting facts to use")
+                    document_kind = kind
+                    if kind == "minutes":
+                        request = purpose.strip()
+                elif source_mode == "web_research":
+                    if self.research_service is None:
+                        raise tool_failure("research_unavailable", "web research is not configured")
+                    result = await self.research_service.run(topic_text, max_sources=5, max_chars=20_000)
+                    sources = [source for source in result.sources if (source.text or source.snippet).strip()]
+                    if not sources:
+                        raise tool_failure("research_no_sources", "search returned no usable source material")
+                    facts["Research question"] = result.query
+                    facts["Research sources"] = [
+                        f"[{source.id}] {source.title}\nPublisher: {source.publisher or 'not identified'}\n"
+                        f"Published: {source.published or 'date not provided'}\nURL: {source.url}\n"
+                        f"Fetched page: {'yes' if source.fetched else 'no; using search snippet'}\n"
+                        f"Evidence: {source.text or source.snippet}"
+                        for source in sources
+                    ]
+                    warnings.extend(result.warnings)
+                    if len(sources) < 3:
+                        warnings.append(f"Only {len(sources)} usable source(s) were found; conclusions may be incomplete.")
+                    if any(not source.fetched for source in sources):
+                        warnings.append("At least one page could not be retrieved; its search snippet is weaker evidence.")
+                    if warnings:
+                        facts["Research limitations"] = list(dict.fromkeys(warnings))
+                    references = tuple(
+                        (f"[{source.id}] {source.title} ({source.published or 'date not provided'})", source.url)
+                        for source in sources)
+                elif source_mode == "tool_catalog":
+                    if self.tool_inventory is None:
+                        raise tool_failure("tool_inventory_unavailable", "the active tool list is unavailable")
+                    entries = self.tool_inventory()
+                    if not entries:
+                        raise tool_failure("tool_inventory_unavailable", "there are no registered tools to list")
+                    rows: list[str] = []
+                    for entry in entries:
+                        name = str(entry.get("name", "")).strip()
+                        if not name:
+                            continue
+                        description = str(entry.get("description", "")).strip()[:500]
+                        params = ", ".join(sorted(entry.get("params", {})))
+                        required = ", ".join(entry.get("required", [])) or "none"
+                        access = "read-only" if entry.get("read_only") else "may change state"
+                        rows.append(f"- **{name}**: {description} Parameters: {params or 'none'}; required: {required}; access: {access}.")
+                    if not rows:
+                        raise tool_failure("tool_inventory_unavailable", "there are no registered tools to list")
+                    markdown = (f"# {document_title}\n\nAudience: {brief['audience']}\nPurpose: {brief['purpose']}\n\n"
+                                "## Tools registered in this session\n\n" + "\n".join(rows))
+                    document = parse_markdown(markdown, title=document_title)
+                    saved = await asyncio.to_thread(self.store.save, document, format)
+                    return {"file": saved.name, "path": saved.path, "format": saved.format, "bytes": saved.size,
+                            "source_mode": source_mode, "written_by_model": False,
+                            "note": "generated from the tools registered for this session", "tool_count": len(rows),
+                            "warnings": list(saved.warnings), "font_size": self.settings.doc_font_size}
+                elif source_mode == "approved_knowledge":
+                    if self.knowledge_service is None or self.memory_scope is None:
+                        raise tool_failure("knowledge_unavailable", "approved knowledge is not configured")
+                    hits = await self.knowledge_service.search(self.memory_scope, topic_text, limit=5, max_chars=8_000)
+                    if not hits:
+                        raise tool_failure("knowledge_no_sources", "no approved, accessible knowledge matched that topic")
+                    facts["Approved knowledge question"] = topic_text
+                    source_facts: list[str] = []
+                    source_refs: list[tuple[str, str]] = []
+                    for index, hit in enumerate(hits, 1):
+                        source_id = f"k{index}"
+                        effective = hit.document.effective_date.isoformat() if hit.document.effective_date else "date not provided"
+                        source_name = hit.document.source
+                        if not source_name.startswith(("http://", "https://")) and Path(source_name).is_absolute():
+                            source_name = Path(source_name).name
+                        citation = f"{hit.document.title}, version {hit.document.version}, effective {effective}"
+                        source_facts.append(f"[{source_id}] {citation}\nDocument source: {source_name}\n"
+                                            f"Chunk id: {hit.chunk.id}\nEvidence: {hit.chunk.render()}")
+                        source_refs.append((f"[{source_id}] {citation}", source_name or "approved knowledge"))
+                    facts["Approved knowledge passages"] = source_facts
+                    if len(hits) < 3:
+                        warnings.append(f"Only {len(hits)} approved passage(s) matched; the answer may be incomplete.")
+                        facts["Knowledge limitations"] = warnings
+                    references = tuple(source_refs)
+                elif source_mode == "provided_material":
+                    try:
+                        path = resolve_inside(self.workspace.inbox, file_name.strip())
+                        text, file_warnings = read_cv(path)
+                    except CvError as exc:
+                        raise tool_failure("provided_file_error", str(exc)) from exc
+                    if not text.strip():
+                        raise tool_failure("provided_file_empty", "the selected file contains no readable text")
+                    if preserve_personal_details:
+                        warnings.append("Personal details were included at the authorized speaker's explicit request.")
+                    else:
+                        redacted = redact_for_model(text)
+                        if redacted != text:
+                            warnings.append("Personal details and protected-attribute lines were heuristically redacted before drafting.")
+                        text = redacted
+                    facts["Provided material"] = [f"[f1] File: {path.name}\nContent:\n{text[:20_000]}"]
+                    warnings.extend(file_warnings)
+                    if len(text) > 20_000:
+                        warnings.append("Only the first 20,000 extracted characters were used.")
+                    if warnings:
+                        facts["File limitations"] = list(dict.fromkeys(warnings))
+                    references = (("[f1] User-provided file", f"work/inbox/{path.name}"),)
+
+                composed = await self.composer.compose(
+                    document_kind, document_title, request, facts, structure=(
+                        RULES[self.meeting_type].minutes if source_mode == "meeting" and kind == "minutes" else ""),
+                    references=references, audience=brief["audience"], purpose=brief["purpose"], length=length)
+                saved = await asyncio.to_thread(self.store.save, composed.document, format)
+                return {"file": saved.name, "path": saved.path, "format": saved.format, "bytes": saved.size,
+                        "source_mode": source_mode, "written_by_model": composed.used_model, "note": composed.note,
+                    "source_count": len(references), "warnings": [*warnings, *composed.warnings, *saved.warnings],
+                        "font_size": self.settings.doc_font_size}
+
+            return self._start_document_job(job_kind, document_title, work)
+
+        modes = self._document_source_modes()
+        schema: dict[str, Any] = {
+            "type": "OBJECT",
+            "properties": {
+                "source_mode": {"type": "STRING", "enum": list(modes)},
+                "title": {"type": "STRING"},
+                "audience": {"type": "STRING"},
+                "purpose": {"type": "STRING"},
+                "length": {"type": "STRING", "enum": list(DOCUMENT_LENGTHS)},
+                "topic": {"type": "STRING"},
+                "file_name": {"type": "STRING", "description": "A file already in work/inbox; never a path outside it"},
+                "meeting_selector": {"type": "STRING", "description": "current (default), previous, or a numbered meeting"},
+                "preserve_personal_details": {"type": "BOOLEAN", "description": "Default false; requires explicit authorized-speaker opt-in"},
+                "format": {"type": "STRING", "enum": list(FORMATS)},
+                "kind": {"type": "STRING", "enum": ["minutes", "summary", "custom"]},
+            },
+            "required": ["source_mode", "title", "audience", "purpose", "length"],
+        }
+        return ToolDef(
+            "create_document_from_source", {"source_mode": str, "title": str, "audience": str, "purpose": str, "length": str},
+            handler, optional={"topic": str, "file_name": str, "meeting_selector": str, "format": str, "kind": str,
+                               "preserve_personal_details": bool},
+            description="Create a document from one explicit source_mode: " + ", ".join(modes) + ". Required brief: title, audience, "
+                        "purpose, length. Ask for essential missing details before calling. web_research and approved_knowledge require "
+                        "topic; provided_material requires a filename in work/inbox. Never substitute sources.",
+            timeout_s=5.0, permission="documents", side_effect=True, live_write=True, category="documents",
+            cost="metered" if "web_research" in modes else "model", latency="background", parameters_schema=schema)
+
+    def _start_document_job(self, kind: str, title: str, work: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+        key = f"document:{kind}:{title.lower()[:60]}"
+        same = next((j for j in self.jobs.list(self.session_id) if j.kind == key and j.state in ("queued", "running")), None)
+        if same is not None:
+            return {"status": "started", "job_id": same.job_id,
+                    "note": "this document is already being written; do not start another"}
+
+        async def announce_when_done() -> dict[str, Any]:
+            result = await work()
+            self._announce(f"The {kind} document is ready: {result['file']}. It is saved in the documents folder.")
+            return result
+
+        try:
+            job = self.jobs.start(self.session_id, key, announce_when_done)
+        except JobLimitReached as exc:
+            raise tool_failure("busy", str(exc), retryable=True) from exc
+        return {"status": "started", "job_id": job.job_id,
+                "note": "the document is being written; you will be told when it is ready, or check job_status"}
 
     def _job_status_tool(self) -> ToolDef:
         def handler(job_id: str) -> dict[str, Any]:

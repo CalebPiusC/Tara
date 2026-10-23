@@ -171,6 +171,18 @@ def test_composer_falls_back_to_a_deterministic_document_when_the_model_fails():
         assert "Use Postgres" in md and "Alex: write docs by Friday" in md and "drafted by an AI" not in md
 
 
+def test_composer_warns_when_research_citations_are_missing_or_unknown():
+    valid_sources = (("[s1] Official guide", "https://example.com/guide"),)
+    unknown = run(DocumentComposer(Gen("# Topic\n\nA claim [s9].")).compose(
+        "research", "Topic", "Explain topic", {"Evidence": ["evidence"]}, references=valid_sources))
+    assert any("unknown source ID(s): s9" in warning for warning in unknown.warnings)
+    assert "Citation check" in render_markdown(unknown.document)
+
+    missing = run(DocumentComposer(Gen("# Topic\n\nA claim without a citation.")).compose(
+        "research", "Topic", "Explain topic", {"Evidence": ["evidence"]}, references=valid_sources))
+    assert any("No inline source IDs" in warning for warning in missing.warnings)
+
+
 def test_interview_reports_say_a_human_decides_and_are_marked_confidential():
     c = run(DocumentComposer(None).compose("interview_report", "Report", "", {"Evidence": ["quote"]}))
     assert c.document.confidential and "not a hiring decision" in render_markdown(c.document)

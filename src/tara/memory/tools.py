@@ -25,7 +25,8 @@ def remember_memory_tool(service: MemoryService, scope: MemoryScope, gate: Memor
         if not gate.remember_allowed():
             raise PermissionDenied("remember_memory requires an explicit request from the participant")
         item = await service.remember(scope, text.strip()[:MAX_MEMORY_CHARS], source=source,
-                                      kind=normalize_kind(kind), session_id=session_id)
+                                      kind=normalize_kind(kind), session_id=session_id,
+                                      metadata={"explicit_save": True})
         return {"status": "saved", "id": item.id, "kind": item.kind,
                 "say": "Tell the participant in one short sentence that it is saved and that you can bring it up "
                        "whenever they ask, including in a later meeting. Do not stay silent."}

@@ -5,7 +5,7 @@
 ## What it does
 
 - Stores an explicitly requested memory (`remember_memory`) in PostgreSQL, or in the in-memory store used by tests.
-- Stores automatic meeting notes without being asked: SESSION-tier decisions, action items, open questions and proposals detected in a finished turn go to the live meeting memory **and** to the durable store as candidates. A process exit no longer loses them.
+- Stores automatic meeting notes without being asked: SESSION-tier decisions, action items, open questions and proposals detected in a finished turn go to the live meeting memory **and** to the durable store as candidates. A process exit no longer loses them. Repeated sightings may promote a candidate's storage status to `confirmed`; that is not evidence of explicit agreement, and recall labels repeated automatic memories accordingly.
 - Extracts transcript chunks, a summary and verified candidate facts at checkpoints and at the end; each fact must carry a verbatim quote from the transcript.
 - Keeps proposals separate from decisions. "We should probably use PostgreSQL" is stored as a `note` candidate with `metadata.tentative=true`; only committed wording such as "we have decided" can produce a `decision` candidate. Candidates remain unconfirmed until explicitly promoted or seen again in a later meeting.
 - Links an explicit correction to the record it replaces when the target can be identified confidently. The old row stays with `status=superseded`, `metadata.superseded_by`, its source and timestamps. Ambiguous corrections keep every candidate and set `metadata.possible_conflict` and `metadata.correction_candidates` instead of guessing.
@@ -96,6 +96,8 @@ Canonical persisted kinds: `fact`, `preference`, `project`, `decision`, `correct
 3. `retrieval.rank_hits` re-ranks candidates: FTS rank, rarity-weighted keyword coverage, phrase match, status, kind, recency (45-day half-life), conflict penalty and a diversity pass that removes near-duplicates.
 4. If a time or kind filter produced no keyword candidates, the newest records inside that window are used instead, labelled as `recent` rather than an exact match.
 5. `recall_memory` returns id, text, kind, source, status, label, meeting number/time, and a conflict warning. The model is told to say plainly when nothing was found.
+
+Current labeled offline regressions in `tests/memory/test_memory_retrieval.py` check expected decision/action matches, stale-item filtering, unanswerable queries, section canaries, and whether automatic repetition is distinguished from explicit agreement. This is a regression set, not a retrieval-quality benchmark; see [RAG_AND_MEMORY_EVALUATION](RAG_AND_MEMORY_EVALUATION.md).
 
 Cross-meeting recall happens inside one section (scope `meeting_id` is the section). Records with no section are global for that user. Another user or tenant never matches, even with identical text.
 

@@ -10,12 +10,14 @@ from tara.core.settings import RuntimeSettings, WorkSettings, validate
 from tara.floor.classify import RuleIntentClassifier
 from tara.floor.participation import Attribution
 from tara.hiring.github import GitHubReader
+from tara.memory import InMemoryKnowledgeStore, KnowledgeService
 from tara.memory.models import MemoryScope
 from tara.memory.service import MemoryService
 from tara.memory.store import InMemoryMemoryStore
 from tara.testing.fakes import FakeLLMProvider
 from tara.testing.voice_fakes import FakeVoiceProvider, FakeVoiceSession
 from tara.tools.executor import ToolExecutor
+from tara.tools.utility.contracts import ResearchResult, ResearchSource
 from tara.voice.app import LiveTaraApp
 from tara.voice.engine import LiveParams, LiveVoiceEngine
 from tara.voice.events import InputTranscript, ToolCallRequested, ToolRequest, TurnComplete, VoiceSessionConfig
@@ -84,10 +86,12 @@ async def finish_job(work, job_id):
 def test_catalog_lists_only_enabled_features_and_marks_writes(tmp_path):
     work, ex = make_work(tmp_path)
     names = {d["name"]: d for d in ex.catalog()}
-    assert {"recall_meeting", "meeting_recap", "create_document", "job_status", "list_candidates", "get_candidate", "prepare_candidate",
+    assert {"recall_meeting", "meeting_recap", "create_document", "create_document_from_source", "job_status", "list_candidates", "get_candidate", "prepare_candidate",
             "start_interview", "interview_next_question", "interview_record_answer", "finish_interview",
             "recap_meeting", "set_meeting_type", "add_vocabulary", "set_agenda", "agenda_status", "agenda_mark"} == set(names)
     assert not names["recall_meeting"]["side_effect"] and names["create_document"]["side_effect"] and names["create_document"]["latency"] == "background"
+    source_schema = next(d for d in work.tool_defs if d.name == "create_document_from_source").parameters_schema
+    assert source_schema["properties"]["source_mode"]["enum"] == ["meeting", "provided_material"]
     off = WorkServices(WorkSettings(enabled=True, dir=str(tmp_path / "w2"), hiring=False, documents=False), session_id="s", scope=SC, cfg=cfg(),
                        roles=ROLES, names=NAMES, meeting_memory=InMemoryMeetingMemory(), working=WorkingMemory(), control=ControlState(), min_conf=0.8)
     assert {d.name for d in off.tool_defs} == {"recall_meeting", "meeting_recap", "recap_meeting", "set_meeting_type", "add_vocabulary",
@@ -223,6 +227,230 @@ async def test_documents_report_honest_failures_and_isolation(tmp_path):
     assert "Fallback" in Path(job3.result["path"]).read_text()
     for w in (work, other, no_model):
         await w.close()
+
+
+@aio
+async def test_research_document_uses_web_evidence_not_meeting_memory(tmp_path):
+    class FakeResearch:
+        def __init__(self):
+            self.calls = []
+
+        async def run(self, query, *, max_sources=None, max_chars=None):
+            self.calls.append((query, max_sources, max_chars))
+            if query == "no results":
+                    return ResearchResult(query=query, queries=(query,), sources=(), provider="fake")
+            return ResearchResult(
+                query=query, queries=(query,), provider="fake",
+                sources=(ResearchSource("s1", "AI agents overview", "https://example.com/agents",
+                                        snippet="Agents use tools to act toward goals.",
+                                        text="An AI agent observes its environment and takes actions toward a goal.",
+                                        fetched=True),))
+
+    prompts = []
+
+    def write_document(req, _attempt):
+        prompts.append(req.user)
+        return "# AI agents\n\nAn AI agent observes its environment and acts toward a goal [s1]."
+
+    memory_service = MemoryService(InMemoryMemoryStore())
+    memory_scope = MemoryScope("t1", "u1", meeting_id="m1")
+    await memory_service.remember(memory_scope, "MEETING_ONLY_canary: unrelated project decision.",
+                                  source="s1:turn:1", session_id="s1")
+    research = FakeResearch()
+    work, ex = make_work(tmp_path, llm=FakeLLMProvider(write_document), research_service=research,
+                         memory_service=memory_service, memory_scope=memory_scope)
+    authorize(work)
+    try:
+        started = await acall(ex, "create_document_from_source", source_mode="web_research", topic="Explain AI agents",
+                      title="AI agents", audience="New developers", purpose="Explain the concept",
+                      length="brief", format="md")
+        assert started.ok and started.output["status"] == "started"
+        job = await finish_job(work, started.output["job_id"])
+        assert job.state == "completed" and job.result["source_count"] == 1
+        assert research.calls == [("Explain AI agents", 5, 20_000)]
+        assert "observes its environment" in prompts[0] and "MEETING_ONLY_canary" not in prompts[0]
+        assert "If sources disagree, describe the differing evidence" in prompts[0]
+        content = Path(job.result["path"]).read_text()
+        assert "acts toward a goal [s1]" in content
+        assert "Sources" in content and "https://example.com/agents" in content
+        assert "MEETING_ONLY_canary" not in content
+
+        empty = await acall(ex, "create_document_from_source", source_mode="web_research", topic="no results",
+                    title="No sources", audience="Developers", purpose="Explain the topic", length="brief")
+        assert empty.ok
+        empty_job = await finish_job(work, empty.output["job_id"])
+        assert empty_job.state == "failed" and empty_job.error == "ToolError"
+    finally:
+        await work.close()
+
+
+@aio
+async def test_tool_catalog_document_lists_active_tools_without_meeting_notes(tmp_path):
+    memory_service = MemoryService(InMemoryMemoryStore())
+    memory_scope = MemoryScope("t1", "u1", meeting_id="m1")
+    await memory_service.remember(memory_scope, "MEETING_ONLY_canary: unrelated project decision.",
+                                  source="s1:turn:1", session_id="s1")
+    inventory = [
+        {"name": "web_search", "description": "Search current public web pages.", "params": {"query": "str"},
+         "required": ["query"], "read_only": True},
+        {"name": "meeting_lookup", "description": "Read a previous meeting record.", "params": {"which": "str"},
+         "required": [], "read_only": True},
+    ]
+    work, ex = make_work(tmp_path, memory_service=memory_service, memory_scope=memory_scope,
+                         tool_inventory=lambda: inventory)
+    authorize(work)
+    try:
+        started = await acall(ex, "create_document_from_source", source_mode="tool_catalog", title="Tara tools",
+                      audience="Developers", purpose="Review available integrations", length="standard", format="md")
+        assert started.ok and started.output["status"] == "started"
+        job = await finish_job(work, started.output["job_id"])
+        assert job.state == "completed" and job.result["tool_count"] == 2
+        content = Path(job.result["path"]).read_text()
+        assert "web_search" in content and "meeting_lookup" in content
+        assert "Search current public web pages." in content and "Parameters: query; required: query" in content
+        assert "MEETING_ONLY_canary" not in content
+    finally:
+        await work.close()
+
+
+@aio
+async def test_approved_knowledge_document_uses_only_accessible_approved_chunks(tmp_path):
+    memory_scope = MemoryScope("t1", "u1", meeting_id="m1")
+    knowledge = KnowledgeService(InMemoryKnowledgeStore())
+    await knowledge.ingest_text(memory_scope, "Approved AI policy", "Approved agents may use company APIs.",
+                                source="policy.md", section_id="m1", approved=True)
+    await knowledge.ingest_text(memory_scope, "Unapproved AI policy", "UNAPPROVED_canary hidden text.",
+                                source="draft.md", section_id="m1", approved=False)
+    await knowledge.ingest_text(memory_scope, "Other section", "OTHER_SECTION_canary hidden text.",
+                                source="other.md", section_id="another-section", approved=True)
+    memory_service = MemoryService(InMemoryMemoryStore())
+    await memory_service.remember(memory_scope, "MEETING_ONLY_canary unrelated decision.",
+                                  source="s1:turn:1", session_id="s1")
+    prompts = []
+
+    def write_document(req, _attempt):
+        prompts.append(req.user)
+        return "# AI policy\n\nApproved agents may use company APIs [k1]."
+
+    work, ex = make_work(tmp_path, llm=FakeLLMProvider(write_document), knowledge_service=knowledge,
+                         memory_service=memory_service, memory_scope=memory_scope)
+    authorize(work)
+    try:
+        started = await acall(ex, "create_document_from_source", source_mode="approved_knowledge",
+                              topic="approved agents company APIs", title="AI policy", audience="Engineers",
+                              purpose="Explain approved API use", length="brief", format="md")
+        assert started.ok
+        job = await finish_job(work, started.output["job_id"])
+        assert job.state == "completed" and job.result["source_count"] == 1
+        assert "Approved agents may use company APIs." in prompts[0]
+        for forbidden in ("UNAPPROVED_canary", "OTHER_SECTION_canary", "MEETING_ONLY_canary"):
+            assert forbidden not in prompts[0]
+        content = Path(job.result["path"]).read_text()
+        assert "[k1]" in content and "policy.md" in content
+    finally:
+        await work.close()
+
+
+@aio
+async def test_provided_material_document_is_confined_to_inbox_and_uses_brief(tmp_path):
+    from tara.docgen.composer import DocumentComposer, LlmTextGenerator
+
+    work, ex = make_work(tmp_path)
+    authorize(work)
+    work.workspace.inbox.mkdir(parents=True, exist_ok=True)
+    supplied = work.workspace.inbox / "agent-notes.md"
+    supplied.write_text("Age: 32\nContact: alice@example.com\nAn agent selects tools and acts toward a defined goal.", encoding="utf-8")
+    outside = tmp_path / "private.txt"
+    outside.write_text("OUTSIDE_INBOX_canary", encoding="utf-8")
+    prompts = []
+
+    def write_document(req, _attempt):
+        prompts.append(req.user)
+        return "# Agents\n\nAn agent selects tools and acts toward a goal [f1]."
+
+    work.llm = FakeLLMProvider(write_document)
+    work.composer = DocumentComposer(LlmTextGenerator(work.llm))
+    try:
+        started = await acall(ex, "create_document_from_source", source_mode="provided_material",
+                              file_name="agent-notes.md", title="Agents", audience="Product team",
+                              purpose="Explain these notes", length="brief", format="md")
+        assert started.ok
+        job = await finish_job(work, started.output["job_id"])
+        assert job.state == "completed" and job.result["source_count"] == 1
+        assert "selects tools and acts toward a defined goal" in prompts[0]
+        assert "Product team" in prompts[0] and "Explain these notes" in prompts[0] and "brief" in prompts[0]
+        assert "alice@example.com" not in prompts[0] and "Age: 32" not in prompts[0]
+        assert "[email removed]" in prompts[0] and "OUTSIDE_INBOX_canary" not in prompts[0]
+        generated = Path(job.result["path"]).read_text()
+        assert "[f1]" in generated and "work/inbox/agent-notes.md" in generated
+
+        denied_opt_in = await acall(ex, "create_document_from_source", source_mode="provided_material",
+                        file_name="agent-notes.md", title="Agents with details", audience="Product team",
+                        purpose="Explain these notes", length="brief", preserve_personal_details=True)
+        assert not denied_opt_in.ok and denied_opt_in.error == "personal_details_opt_in_required"
+
+        work.on_transcript("Please include personal details as written.", Attribution("r", 0.99))
+        preserved = await acall(ex, "create_document_from_source", source_mode="provided_material",
+                    file_name="agent-notes.md", title="Agents with details", audience="Product team",
+                    purpose="Explain these notes", length="brief", preserve_personal_details=True)
+        assert preserved.ok
+        preserved_job = await finish_job(work, preserved.output["job_id"])
+        assert preserved_job.state == "completed" and "alice@example.com" in prompts[-1]
+
+        missing_audience = await acall(ex, "create_document_from_source", source_mode="meeting", title="Missing brief",
+                           audience="", purpose="Create a meeting brief", length="brief")
+        assert not missing_audience.ok and missing_audience.error == "missing_audience"
+
+        rejected = await acall(ex, "create_document_from_source", source_mode="provided_material",
+                               file_name="../private.txt", title="Outside", audience="Team",
+                               purpose="Use outside file", length="brief", format="md")
+        assert rejected.ok
+        rejected_job = await finish_job(work, rejected.output["job_id"])
+        assert rejected_job.state == "failed" and rejected_job.error == "ToolError"
+    finally:
+        await work.close()
+
+
+@aio
+async def test_meeting_documents_are_scoped_to_current_or_selected_session(tmp_path):
+    memory_scope = MemoryScope("t1", "u1", meeting_id="m1")
+    memory_service = MemoryService(InMemoryMemoryStore())
+    for number in (1, 2, 3):
+        session_id = f"run-{number}"
+        await memory_service.start_session(memory_scope, session_id)
+        await memory_service.remember(memory_scope, f"MEETING_{number}_canary: summary for meeting {number}.",
+                                      source=f"{session_id}:summary", kind="summary", session_id=session_id)
+        if number < 3:
+            await memory_service.end_session(memory_scope, session_id)
+
+    prompts = []
+
+    def write_document(req, _attempt):
+        prompts.append(req.user)
+        return "# Meeting document\n\nSummary from the selected meeting."
+
+    work, ex = make_work(tmp_path, session_id="run-3", llm=FakeLLMProvider(write_document),
+                         memory_service=memory_service, memory_scope=memory_scope)
+    authorize(work)
+    try:
+        for selector, title, included, excluded in (
+            ("current", "Current", "MEETING_3_canary", ("MEETING_1_canary", "MEETING_2_canary")),
+            ("previous", "Previous", "MEETING_2_canary", ("MEETING_1_canary", "MEETING_3_canary")),
+            ("1", "First", "MEETING_1_canary", ("MEETING_2_canary", "MEETING_3_canary")),
+        ):
+            started = await acall(ex, "create_document_from_source", source_mode="meeting", meeting_selector=selector,
+                                  kind="summary", title=title, audience="Team", purpose="Review the meeting",
+                                  length="brief", format="md")
+            assert started.ok
+            job = work.jobs.get("run-3", started.output["job_id"])
+            await job.task
+            assert job.state == "completed"
+            assert included in prompts[-1]
+            assert all(value not in prompts[-1] for value in excluded)
+    finally:
+        await work.close()
+
+
 @aio
 async def test_busy_job_board_is_reported_not_queued_forever(tmp_path):
     gate = asyncio.Event()

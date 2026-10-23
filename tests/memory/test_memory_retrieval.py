@@ -26,6 +26,7 @@ from tara.memory import (
 )
 from tara.memory.kinds import normalize_kind
 from tara.memory.models import new_id
+from tara.memory.retrieval import claim_label
 from tara.memory.service import span
 from tara.secretary.auto_memory import AutoMemory, AutoMemoryConfig
 from tara.secretary.recorder import parse_digest
@@ -63,6 +64,17 @@ def test_one_kind_vocabulary_with_explicit_translation():
 
 def test_meeting_slug_is_still_the_scope_encoding():
     assert meeting_slug("Join Meeting #2") == "join-meeting-2"
+
+
+def test_confirmed_auto_memory_is_not_labelled_as_explicit_agreement():
+    repeated = MemoryItem(new_id(), scope(), "fact", "The team uses PostgreSQL.", "auto:s1",
+                          status="confirmed", metadata={"auto": True, "sightings": 2})
+    explicit = MemoryItem(new_id(), scope(), "fact", "The team chose PostgreSQL.", "explicit:s1",
+                          status="confirmed", metadata={"explicit_save": True})
+    completed = MemoryItem(new_id(), scope(), "action", "The report was sent.", "completion:s1", status="confirmed")
+    assert claim_label(repeated) == "repeatedly mentioned, not explicitly agreed"
+    assert claim_label(explicit) == "explicitly saved on request"
+    assert claim_label(completed) == "confirmed"
 
 
 # ---- claims ----------------------------------------------------------------------------------------------------
@@ -265,6 +277,43 @@ def test_ranking_prefers_a_confirmed_record_over_a_candidate_with_equal_relevanc
         await svc.store.add(confirmed)
         hits = await svc.recall(scope(), "billing stripe")
         assert [h.item.id for h in hits][:2] == [confirmed.id, candidate.id]
+    run(go())
+
+
+def test_labeled_retrieval_regression_cases_cover_kind_time_and_scope():
+    async def go():
+        svc = service()
+        sc = scope("retrieval-eval")
+        now = utcnow()
+        decision = MemoryItem(new_id(), sc, "decision", "We decided to use PostgreSQL for durable memory.",
+                              "eval:meeting-1", session_id="run-1", status="confirmed",
+                              created_at=now - timedelta(days=1), updated_at=now - timedelta(days=1))
+        action = MemoryItem(new_id(), sc, "action", "Owner will add email audit tests by Friday.",
+                            "eval:meeting-1", session_id="run-1", status="candidate",
+                            created_at=now - timedelta(days=1), updated_at=now - timedelta(days=1),
+                            metadata={"auto": True, "state": "open"})
+        stale = MemoryItem(new_id(), sc, "decision", "We selected Redis for the archive cache.",
+                           "eval:meeting-2", session_id="run-2", status="confirmed",
+                           created_at=now - timedelta(days=60), updated_at=now - timedelta(days=60))
+        for item in (decision, action, stale):
+            await svc.store.add(item)
+        await svc.remember(scope("another-section"), "SECTION_CANARY_A7F2 private decision.",
+                           source="eval:other", kind="decision", session_id="other-run")
+
+        labeled_cases = (
+            ("postgres durable memory", ("decision",), None, decision.id),
+            ("email audit tests", ("action",), None, action.id),
+        )
+        for query, kinds, since, expected_id in labeled_cases:
+            hits = await svc.recall(sc, query, kinds=kinds, since=since, now=now)
+            assert hits and hits[0].item.id == expected_id, query
+
+        recent_redis = await svc.recall(sc, "redis archive cache", kinds=("decision",),
+                                        since=now - timedelta(days=7), now=now)
+        assert all(hit.item.id != stale.id for hit in recent_redis)
+        assert await svc.recall(sc, "quantum photosynthesis", now=now) == []
+        assert await svc.recall(sc, "SECTION_CANARY_A7F2", now=now) == []
+
     run(go())
 
 

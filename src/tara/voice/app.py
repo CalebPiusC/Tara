@@ -193,9 +193,12 @@ class LiveTaraApp:
                 min_conf=min_confidence(cfg, thresholds),
                 llm=text_llm_from_settings(settings.gemini.api_key, settings.gemini.model, settings.limits.cloud_timeout_s),
                 fetcher=fetcher, github=github, memory_service=self.memory_service, memory_scope=self.memory_scope,
+                knowledge_service=self.knowledge_service,
                 metrics=self.metrics, send_note=lambda note: self.engine.queue_note(note),
                 candidate_speakers=frozenset(pid for pid, r in roles.items() if r is Role.CANDIDATE),
                 memory_gate=self.memory_gate, speak=lambda text: self.engine.prompt(text),
+                research_service=(self.orchestration.research if self.orchestration is not None else None),
+                tool_inventory=lambda: self.engine.tools.describe() if self.engine.tools is not None else [],
                 on_kind=lambda kind: self.behaviour.kinds.set_override(kind),
                 recorder_llm=(text_llm_from_settings(settings.gemini.api_key, settings.work.recorder_model,
                                                      settings.work.digest_timeout_s)

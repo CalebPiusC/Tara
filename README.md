@@ -8,12 +8,18 @@ Tara is an AI participant for live meetings. She joins a conversation by voice, 
 
 Most meeting bots transcribe. Tara takes part. The difference is judgement: a model that speaks whenever it has something to say is worse than silence in a hiring interview or a customer call. So Tara is built on one rule: **deterministic code owns the floor, permissions, identity and tools, and the language model only proposes.**
 
+**Current status:** Tara is a Python backend with a Gemini Live voice path, PostgreSQL memory, meeting tools, interviews, and document generation. Offline behavior is tested. One real text-to-audio Gemini smoke test has run; real conversational quality, multi-speaker attribution, and end-to-end Google Meet behavior remain unverified. Check the [changelog](CHANGELOG.md) for dated evidence and limits.
+
+## Continuing Core-Intelligence Work
+
+Start with the [Core Intelligence Gap Analysis](docs/architecture/CORE_INTELLIGENCE_GAP_ANALYSIS.md) for the current implementation map, remaining gaps, and recommended next task. Then use the [architecture index](docs/architecture/README.md) for component details and the [changelog](CHANGELOG.md) for recent changes and verification results. The changelog is a project record; tools and new sessions do not automatically load it, so use this section as the explicit starting point.
+
 ---
 
 ## Features
 
 ### Conversation
-- **Natural voice** with Gemini Live: speech in, speech out, low latency.
+- **Natural voice** with Gemini Live: speech in, speech out. Latency and conversational quality are not yet established by a representative evaluation.
 - **Knows when to speak.** Being addressed, being invited, being told to be quiet, being interrupted and being taken over are separate states, not one flag.
 - **Interruption handling.** Speech from a human cancels Tara mid-sentence, and history keeps only what was actually heard.
 - **Human takeover.** "Thanks Tara, I'll take it from here" closes her speech path at once.
@@ -21,10 +27,10 @@ Most meeting bots transcribe. Tara takes part. The difference is judgement: a mo
 - **A personality, not a script.** Profiles (`professional`, `conversational`, `expressive`) shape tone and length. They never decide whether she speaks.
 
 ### Memory
-- **Keeps the meeting without being asked.** Tara stores the conversation in PostgreSQL as it happens (transcript chunks, a summary and key facts), so nobody has to say "remember this". Saying it still works and marks something as confirmed.
-- **Sections and numbered meetings.** A section is like a chat. Every run of the same section is its next numbered meeting (meeting 1, meeting 2, ...), stored with its date and time. Ask "what did we talk about last meeting?", "what was meeting two?" or "which meetings have we had?". A different section name starts a separate memory, so sections never mix.
+- **Keeps the meeting without being asked.** When work and PostgreSQL memory are enabled, Tara stores redacted transcript chunks, a generated summary, and candidate facts, so nobody has to say "remember this". Saying it still works and records an explicit save.
+- **Sections and numbered meetings.** A section is like a chat. Every run of the same section is its next numbered meeting (meeting 1, meeting 2, ...), stored with its date and time. Ask "what did we talk about last meeting?", "what was meeting two?" or "which meetings have we had?". Section-scoped records stay separate; explicitly global memories may be visible across sections.
 - **Editable.** Say "delete the last meeting" and Tara removes it, asking "are you sure?" first when it held something important. Say "that's wrong, it's Monday" and she updates the memory, keeping the old version as history.
-- **Careful by design.** Extracted facts need a word-for-word quote from the transcript and are labelled unconfirmed. Passwords, health and money details are never stored. Old chunks are deleted after a retention period you control.
+- **Careful by design.** Automatically extracted facts are candidates and require a supporting quote; repeated sightings do not mean the team explicitly agreed. Sensitive-text detection and redaction are heuristic, not a guarantee. Expired transcript chunks and candidate facts are purged at session startup according to configured retention.
 - **Carries over.** The next session of a meeting starts with its summary and key facts, and Tara looks things up when asked and says plainly when nothing is recorded.
 
 ### Running a meeting
@@ -47,20 +53,21 @@ Most meeting bots transcribe. Tara takes part. The difference is judgement: a mo
 - **Create one from the terminal:** `./dev.sh interview new "Name"`, then `./dev.sh interview run <code>` (add `--meet` to run it in Google Meet) ([INTERVIEWS](docs/interviews/INTERVIEWS.md)).
 
 ### Documents
-- **PDF, DOCX and Markdown** from an interview, a meeting, or anything you ask for.
-- Gemini Flash writes the readable text from stored facts only. Python renders the file with your fonts and formatting.
+- **PDF, DOCX and Markdown** for interviews, meeting records, research topics, tool lists, approved company knowledge, or a file in `work/inbox`.
+- `create_document_from_source` requires an explicit source mode plus title, audience, purpose, and length. Meeting documents use the current session unless a previous meeting is explicitly selected; source modes do not silently fall back to meeting notes.
+- Web research includes source references; approved-knowledge search is scope/ACL constrained; provided files are path-confined and redacted by default. Citation IDs are checked for existence, not for semantic support. Live Gemini tool selection is unverified.
 
 ### Tools
 Time zones, calculator, location, weather, public web pages, optional web search (Brave or Tavily), and bounded background research.
 
 ### Safety
-If something fails Tara says so out loud and the screen shows a problem line. AI-presence disclosure before a meeting, tool use granted per meeting, no raw audio stored by default, secrets never logged, and CV, web and transcript text treated as untrusted data.
+If something fails Tara says so out loud and the screen shows a problem line. A disclosure string is required in meeting configuration, but participant consent and authenticated access are not complete end-to-end. Tool use is granted in code; raw audio is not stored by default; secrets are not logged; CV, web, provided-file, and transcript text are treated as untrusted data.
 
 ---
 
 ## Architecture
 
-Deterministic code sits between the model and the meeting. Gemini Live understands, answers and speaks. Our code decides who may be heard, when playback stops, which tools run and what is remembered.
+Deterministic code sits between the model and the meeting. Gemini Live proposes replies and tool calls. Our code decides who may be heard, when playback stops, which tools run and what is persisted. Live working memory, meeting notes, and durable PostgreSQL memory are separate stores, not yet one unified structured meeting-context projection.
 
 ```mermaid
 flowchart TB
@@ -68,63 +75,66 @@ flowchart TB
     direction LR
     GM["Google Meet"] <--> CH["Bot's own Chrome (separate profile)"]
     CH <-->|"BlackHole 2ch in, 16ch out"| CAB["Virtual audio cables"]
-    CAB --> PRE["Quiet-voice gain, echo guard"]
-    PRE --> REC2["Audio recorder (opt-in, WAV files)"]
+    CAB --> PRE["Audio bridge and gain"]
+    PRE --> REC2["Optional raw-audio recording"]
   end
   LOCAL["Local mic and speakers (./dev.sh local)"] <--> MA
   CAB <--> MA["MeetingAdapter"]
   PRE --> MA
-  MA --> UP
+  MA --> ENG
 
   subgraph Voice["Voice path"]
     direction LR
-    UP["Bounded uplink"] --> PROV["Voice provider interface"]
-    PROV --> GATE["Participation gate (standby: name, model wake, follow-up)"]
-    GATE -->|"allowed audio only"| PB["Playback (cancellable)"]
+    ENG["LiveVoiceEngine"] <--> GEM["Gemini Live"]
+    ENG --> CTX["Working memory\nrecent turns + bounded older digest"]
+    CTX -.->|"reseed after reconnect"| GEM
+    ENG --> GATE["Deterministic participation gate"]
+    GATE -->|"approved response only"| PB["Cancellable playback"]
   end
   PB --> MA
-  PROV <-->|"WSS"| GEM["Gemini Live (cloud)"]
 
-  subgraph Guard["Control and safety"]
+  subgraph Guard["Control and behavior"]
     direction LR
     CTRL["Spoken controls and permissions"]
-    BEH["Behaviour (style only)"]
+    BEH["Behavior (style only)"]
     CLOCK["Agenda clock and opening brief"]
     WATCH["Error watchdog"]
   end
-  Guard -.->|"shapes, nudges, explains failures"| Voice
+  Guard -.->|"controls, styles, nudges, explains failures"| ENG
 
-  subgraph Do["What Tara can do"]
+  subgraph Work["Authorized tools and meeting work"]
     direction LR
-    TOOLS["Tool executor (granted, checked in code)"]
-    MT["Memory tools"]
-    MEETT["Meeting tools"]
-    DOCT["Documents and interviews"]
-    RO["Lookups"]
-    REC["Recorder"]
-    TOOLS --> MT
-    TOOLS --> MEETT
-    TOOLS --> DOCT
-    TOOLS --> RO
+    EXEC["Tool executor\ncode-owned grants"]
+    REC["Meeting recorder"]
+    MT["Memory and meeting tools"]
+    DOC["Document generation\nexplicit source mode"]
+    EXEC --> MT
+    EXEC --> DOC
   end
-  PROV --> TOOLS
-  PROV -.->|"finished turns"| REC
+  ENG --> EXEC
+  ENG -.->|"finished turns"| REC
 
-  subgraph Keep["Storage and text models"]
+  subgraph Sources["Document sources (mode selected explicitly)"]
     direction LR
-    MS["Memory service (scoped to the section)"] --> PG[("PostgreSQL")]
-    FILES[("work folder")]
-    FLASH["Gemini Flash"]
+    MEETFACTS["Selected meeting session facts"]
+    APPROVED["Approved, ACL-checked knowledge"]
+    WEB["Bounded public web research"]
+    INBOX["work/inbox files\nredacted by default"]
+    INVENTORY["Tools registered this session"]
+    MEETFACTS --> DOC
+    APPROVED --> DOC
+    WEB --> DOC
+    INBOX --> DOC
+    INVENTORY --> DOC
   end
-  MT --> MS
-  MEETT --> MS
+  DOC --> FLASH["Gemini Flash\ntext drafting"]
+  DOC --> FILES[("work/documents")]
+  MT --> MS["Scoped memory service"]
   REC --> MS
-  REC -->|"summaries"| FLASH
-  DOCT -->|"document text"| FLASH
-  DOCT --> FILES
+  MS --> PG[("PostgreSQL")]
 ```
 
-Memory tools are remember, recall, update, forget and delete meeting. Meeting tools are open items, agenda, recap, meeting type and vocabulary. Lookups are time, weather, public pages and search. Working memory (the last turns, plus a short digest of older ones) is re-seeded to the model after a reconnect, framed as data and never as instructions; a stale resume handle is dropped after one failed try, and reconnecting keeps trying for about a minute. Gemini Live also compresses its own context window (sliding window) so a long call does not end at 15 minutes. Metrics carry no content. Details of each layer are in [SYSTEM_ARCHITECTURE](docs/architecture/SYSTEM_ARCHITECTURE.md).
+Memory tools cover explicit save/recall/update/forget and meeting history. Automatic transcript chunks and candidate facts are stored when work and memory are enabled. Meeting tools cover open items, agenda, recap, meeting type and vocabulary. Document source modes are meeting, web research, active tool catalog, approved knowledge, and provided inbox material. Web research requires `TARA_TOOLS_SEARCH=1` and `TARA_SEARCH_API_KEY`. Approved knowledge requires memory, `TARA_KNOWLEDGE_ENABLED=1`, and content ingested and approved through `tara knowledge`. Working memory is re-seeded after reconnect as untrusted transcript data. Metrics are intended to carry no conversation content. Details are in [SYSTEM_ARCHITECTURE](docs/architecture/SYSTEM_ARCHITECTURE.md) and [CORE_INTELLIGENCE_GAP_ANALYSIS](docs/architecture/CORE_INTELLIGENCE_GAP_ANALYSIS.md).
 
 Tara is cloud-backed: audio and transcripts go to Google. Details: [GEMINI_LIVE](docs/engine/GEMINI_LIVE.md), [SYSTEM_ARCHITECTURE](docs/architecture/SYSTEM_ARCHITECTURE.md).
 
@@ -176,6 +186,7 @@ erDiagram
     int number "1, 2, 3 and never reused"
     time started "stored in UTC, spoken in local time"
     time ended "empty if the exit was cut short"
+    boolean interrupted "recovered after an unclean exit"
   }
   RECORD {
     string kind "episode, summary, fact, decision, action, note"
@@ -190,6 +201,7 @@ erDiagram
 sequenceDiagram
   participant U as You
   participant T as Tara
+  participant C as Live context
   participant R as Recorder
   participant D as PostgreSQL
   participant F as Gemini Flash
@@ -197,37 +209,43 @@ sequenceDiagram
   T->>D: start meeting N, load earlier meetings and open items
   T->>U: opening brief: where things were left, what is open
   loop during the meeting
-    U->>T: speak
-    T->>U: reply, run tools, nudge on time
-    T->>R: finished turns
-    R->>D: transcript chunk every few turns
+    U->>T: audio and transcript turn
+    T->>C: update recent turns and active response state
+    T->>T: gate reply, wait for floor or stay silent
+    T->>U: approved reply or no-op
+    T->>R: committed turn with speaker label or unknown
+    R->>D: redacted transcript chunk at checkpoints
   end
   U->>T: stop
-  T->>D: mark meeting N ended
+  T->>D: mark meeting N completed or interrupted
   R->>D: save the last chunk
   R->>F: transcript, ask for summary and facts
   F-->>R: summary and facts with exact quotes
-  R->>D: keep the summary, and only facts whose quote is real
+  R->>D: keep summary and quote-verified facts as candidates
+  T->>D: write meeting-scoped minutes from session facts
   Note over R,D: if this step fails, the next start catches up
 ```
 
 ### How memory is organized
 ```mermaid
 flowchart TD
-  SAY["What is said"] --> WM["Working memory: last turns, this session only"]
-  SAY --> CH["Transcript chunks: stored word for word with a retention date"]
-  SAY -->|"you ask: remember, update, forget"| EX["Explicit memory: confirmed, can be edited, history kept"]
-  SAY -->|"you ask: action item, park it, done"| OI["Open items: carry over until completed"]
-  CH --> SUM["Summary and key facts (checked against a real quote)"]
-  SUM --> CAND["Unconfirmed facts: promoted when seen again"]
-  EX --> STORE[("Stored per section")]
+  SPEECH["Transcript and runtime events"] --> LIVE["Working memory\nrecent turns + bounded older digest"]
+  SPEECH --> REC["Recorder\nredacted chunks + quoted facts"]
+  SPEECH -->|"explicit remember request"| EX["Explicit saved memory\nprovenance retained"]
+  SPEECH -->|"action item / park / complete"| OI["Open items\nowner, deadline, state"]
+  REC --> SUM["Generated meeting summary"]
+  REC --> CAND["Candidate facts\nnot agreement by default"]
+  CAND -->|"explicit confirm or repeated evidence"| CONF["Confirmed storage status\nprovenance still distinguishes why"]
+  EX --> STORE[("PostgreSQL\nuser + section scope")]
   OI --> STORE
   SUM --> STORE
   CAND --> STORE
-  STORE --> RECALL["Recall tools: recall, meeting lookup, list meetings, open items"]
-  STORE --> BRIEF["Opening brief and startup context for the next meeting"]
-  STORE --> DOCS["Minutes and reports"]
-  STORE -.->|"expired or deleted"| GONE["Purged or hidden"]
+  CONF --> STORE
+  STORE --> RETRIEVE["Ranked recall\ntime/kind filters + source labels"]
+  STORE --> START["Bounded startup context\nsummary, key facts, few transcript chunks"]
+  STORE --> MEETDOC["Meeting document\ncurrent session by default"]
+  RETRIEVE --> ANSWER["Answer with uncertainty and provenance"]
+  STORE -.->|"expired, deleted, superseded"| HIDDEN["Excluded from active retrieval"]
 ```
 
 ### Where things live
@@ -343,7 +361,7 @@ Tara:  You agreed to send the offer decision by Friday.
 ---
 
 ## What is next
-The Google Meet bot is built and tested against a local stand-in ([GOOGLE_MEET_BOT](docs/google-meet/GOOGLE_MEET_BOT.md)); a first run in a real meeting is next. Real speaker names, calendar roster, teams, a web dashboard and meaning-based search are planned in one phased plan: [GOOGLE_MEET_INTEGRATION](docs/google-meet/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/product/DASHBOARD.md). Emailing the minutes as a document (voice command or automatically at the end, through Resend) is built and tested offline; no real email has been sent yet: [EMAIL_DELIVERY](docs/meetings/EMAIL_DELIVERY.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/getting-started/COMMANDS.md).
+The Google Meet browser adapter has been exercised in real calls, but complete meeting behavior, robust multi-speaker attribution, interruptions, and reconnects remain unverified; see [GOOGLE_MEET_BOT](docs/google-meet/GOOGLE_MEET_BOT.md) and the [changelog](CHANGELOG.md). The current core-intelligence continuation plan is [CORE_INTELLIGENCE_GAP_ANALYSIS](docs/architecture/CORE_INTELLIGENCE_GAP_ANALYSIS.md). Calendar roster, teams, a web dashboard, and meaning-based/vector search remain future work: [GOOGLE_MEET_INTEGRATION](docs/google-meet/GOOGLE_MEET_INTEGRATION.md) and [DASHBOARD](docs/product/DASHBOARD.md). Emailing minutes through Resend is tested offline; no real email has been sent: [EMAIL_DELIVERY](docs/meetings/EMAIL_DELIVERY.md). Every command Tara understands, and which ones carry over to Meet, is in [COMMANDS](docs/getting-started/COMMANDS.md).
 
 ---
 

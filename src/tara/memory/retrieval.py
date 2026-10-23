@@ -185,7 +185,7 @@ def _similar(a: set[str], b: set[str]) -> float:
 
 
 def claim_label(item: MemoryItem) -> str:
-    """How retrieval should describe an item: agreed, mentioned, transcript, or generated."""
+    """Describe provenance without implying that repetition equals agreement."""
     if item.kind == "episode":
         return "transcript"
     if item.kind == "summary":
@@ -194,4 +194,10 @@ def claim_label(item: MemoryItem) -> str:
         return "proposal, not agreed"
     if item.metadata.get("possible_conflict"):
         return "conflicts with another memory"
-    return "agreed or saved on request" if item.status == "confirmed" else "mentioned, not confirmed"
+    if item.metadata.get("explicit_save"):
+        return "explicitly saved on request"
+    if item.kind == "note" and item.metadata.get("minutes"):
+        return "generated meeting summary"
+    if item.status == "confirmed" and item.metadata.get("auto"):
+        return "repeatedly mentioned, not explicitly agreed"
+    return "confirmed" if item.status == "confirmed" else "mentioned, not confirmed"

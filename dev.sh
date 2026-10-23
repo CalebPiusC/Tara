@@ -28,6 +28,17 @@ LAST_LINK_FILE="work/meet/last-link"
 
 launch() { if [ -n "${TARA_DRY_RUN:-}" ]; then echo "$@"; exit 0; fi; exec "$@"; }   # TARA_DRY_RUN=1 only prints the command
 
+ensure_memory_schema() {
+  case "${TARA_MEMORY_ENABLED:-0}" in
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) ;;
+    *) return 0 ;;
+  esac
+  if command -v pg_isready >/dev/null && ! pg_isready -q; then
+    echo "PostgreSQL is not running. Start it (brew services start postgresql) or set TARA_MEMORY_ENABLED=0."; exit 1
+  fi
+  .venv/bin/python -m tara.memory.migrate >/dev/null
+}
+
 ask_link() {
   local last="" answer=""
   [ -f "$LAST_LINK_FILE" ] && last="$(cat "$LAST_LINK_FILE")"
@@ -53,6 +64,7 @@ if [ "${1:-}" = "meet" ]; then
     login) exec .venv/bin/python -m tara.meet.run login ;;
     probe) exec .venv/bin/python -m tara.meet.run probe "${1:?usage: ./dev.sh meet probe <meet link>}" ;;
     join)  link="${1:?usage: ./dev.sh meet join <meet link or code> [--interview <code>] [--address-only] [--transcripts]}"; shift
+           ensure_memory_schema
            exec .venv/bin/python -m tara.meet.run join "$link" "$@" ;;
     *)     echo "usage: ./dev.sh meet check | login | probe <link> | join <link> --interview <code>"; exit 2 ;;
   esac
@@ -67,9 +79,11 @@ if [ "${1:-}" = "interview" ]; then
     run)  code="${1:?usage: ./dev.sh interview run <code> [--meet | --headphones]}"; shift
           if [ "${1:-}" = "--meet" ]; then
             shift; ask_link
+            ensure_memory_schema
             launch .venv/bin/python -m tara.meet.run join "$LINK" "${MEET_DEFAULTS[@]}" --interview "$code" "$@"
           fi
           mode="--speaker"; [ "${1:-}" = "--headphones" ] && mode="--headphones"
+          ensure_memory_schema
           exec .venv/bin/python -m tara.voice.demo --interview "$code" $mode --debug ;;
     *)    echo "usage: ./dev.sh interview new \"Name\" | list | run <code> [--meet | --headphones]"; exit 2 ;;
   esac
@@ -78,12 +92,7 @@ fi
 [ -n "${GEMINI_API_KEY:-}" ] || { echo "GEMINI_API_KEY is empty in .env"; exit 1; }
 [ -n "${TARA_LIVE_MODEL:-}" ] || { echo "TARA_LIVE_MODEL is empty in .env"; exit 1; }
 
-if [ "${TARA_MEMORY_ENABLED:-0}" = "1" ]; then
-  if command -v pg_isready >/dev/null && ! pg_isready -q; then
-    echo "PostgreSQL is not running. Start it (brew services start postgresql) or set TARA_MEMORY_ENABLED=0."; exit 1
-  fi
-  .venv/bin/python -m tara.memory.migrate >/dev/null
-fi
+ensure_memory_schema
 
 [ "${1:-}" = "local" ] && shift
 MODE="--speaker"; DEBUG="--debug"; MEETING=(); TRANSCRIPTS=""; TYPE=()

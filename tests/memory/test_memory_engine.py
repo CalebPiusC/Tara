@@ -89,6 +89,7 @@ def test_a_tool_write_is_refused_until_the_participant_explicitly_asks():
             assert result["status"] == "saved" and result["id"]
             hits = await service.recall(scope, "What is Testflow?")
             assert [h.item.text for h in hits] == ["Testflow is a computer-based testing platform."]
+            assert hits[0].item.metadata["explicit_save"] is True
         finally:
             await engine.close()
     run(go())

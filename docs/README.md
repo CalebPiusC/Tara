@@ -8,6 +8,7 @@ Status labels: Implemented · Partially implemented · Designed not implemented 
 
 | I want to... | Folder |
 |---|---|
+| continue work on context, memory, or turn-taking | [Core Intelligence Gap Analysis](architecture/CORE_INTELLIGENCE_GAP_ANALYSIS.md) |
 | set Tara up, configure it, see every command | [getting-started/](getting-started/README.md) |
 | know what Tara is for and what comes next | [product/](product/README.md) |
 | see how the whole system fits together | [architecture/](architecture/README.md) |

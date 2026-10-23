@@ -1,6 +1,6 @@
 # RAG and Memory Evaluation Plan
 
-**Status: Designed. No dataset, harness or result exists. No numbers in this file are measurements.**
+**Status: Partially implemented.** A small offline labeled regression set covers decision/action retrieval, stale-item time filtering, unanswerable queries, and section isolation in `tests/memory/test_memory_retrieval.py`. The larger dataset and metrics below remain designed, not run. No retrieval-quality number in this file is a measurement.
 
 ## Principle
 Build a small, reproducible, hand-labelled set first. Use plain Python metrics before adopting any framework (Ragas lists suitable metrics but the fetched page did not establish judge requirements). Keep the data in the repo so any developer can rerun it.
