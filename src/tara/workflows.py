@@ -1043,7 +1043,9 @@ class WorkServices:
         try:
             if self.auto.service is not None and self.auto.memory_scope is not None and (m.decisions or m.actions):
                 lines = [f"Decision: {_line(r)}" for r in m.decisions] + [f"Action: {_line(r)}" for r in m.actions]
-                text = f"Meeting '{m.title}' on {m.started[:10]}. " + " ".join(lines)
+                label = (f"meeting {self.current_meeting.number}" if self.current_meeting is not None
+                         else "meeting")
+                text = f"{label.capitalize()} '{m.title}' on {m.started[:10]}. " + " ".join(lines)
                 await self.auto.service.remember(
                     self.auto.memory_scope, text[:1900], source=f"session:{self.session_id}:minutes", kind="note",
                     session_id=self.session_id, metadata={"auto": True, "minutes": True})

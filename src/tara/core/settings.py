@@ -119,6 +119,10 @@ class MemorySettings:
     write_timeout_s: float = 3.0
     recall_timeout_s: float = 2.0
     schema: str = ""                       # optional; tests use a per-run schema
+    knowledge_enabled: bool = False        # approved-document retrieval shares this PostgreSQL database
+    knowledge_search_limit: int = 4
+    knowledge_context_chars: int = 2500
+    knowledge_timeout_s: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -316,7 +320,13 @@ class RuntimeSettings:
                 startup_context=_bool(e.get("TARA_MEMORY_STARTUP_CONTEXT"), True),
                 write_timeout_s=_num(e, "TARA_MEMORY_WRITE_TIMEOUT_S", MemorySettings.write_timeout_s),
                 recall_timeout_s=_num(e, "TARA_MEMORY_RECALL_TIMEOUT_S", MemorySettings.recall_timeout_s),
-                schema=e.get("TARA_MEMORY_SCHEMA", "")),
+                schema=e.get("TARA_MEMORY_SCHEMA", ""),
+                knowledge_enabled=_bool(e.get("TARA_KNOWLEDGE_ENABLED"), False),
+                knowledge_search_limit=_num(e, "TARA_KNOWLEDGE_SEARCH_LIMIT",
+                                            MemorySettings.knowledge_search_limit, int),
+                knowledge_context_chars=_num(e, "TARA_KNOWLEDGE_CONTEXT_CHARS",
+                                             MemorySettings.knowledge_context_chars, int),
+                knowledge_timeout_s=_num(e, "TARA_KNOWLEDGE_TIMEOUT_S", MemorySettings.knowledge_timeout_s)),
             meet=MeetSettings(
                 profile_dir=e.get("TARA_MEET_PROFILE_DIR", MeetSettings.profile_dir), lock_dir=e.get("TARA_MEET_LOCK_DIR", MeetSettings.lock_dir),
                 bot_name=(e.get("TARA_MEET_BOT_NAME", "Tara").strip() or "Tara")[:60], channel=e.get("TARA_MEET_CHANNEL", "chrome").strip(),
@@ -420,7 +430,10 @@ class RuntimeSettings:
                 "gemini": {"enabled": g.enabled, "model": g.model, "api_key": "set" if g.api_key else "missing"},
                 "memory": {"enabled": mem.enabled, "database_url": "set" if mem.database_url else "missing",
                            "search_limit": mem.search_limit, "context_max_chars": mem.context_max_chars,
-                           "startup_context": mem.startup_context, "schema": mem.schema or "public"},
+                           "startup_context": mem.startup_context, "schema": mem.schema or "public",
+                           "knowledge_enabled": mem.knowledge_enabled,
+                           "knowledge_search_limit": mem.knowledge_search_limit,
+                           "knowledge_context_chars": mem.knowledge_context_chars},
                 "behavior": self.behavior.__dict__}
 
 
@@ -566,6 +579,15 @@ def validate(s: RuntimeSettings, *, check_files: bool = False, require_local_mod
         if mem.context_max_chars < 200: err("TARA_MEMORY_CONTEXT_CHARS", "must be >= 200")
         if mem.write_timeout_s <= 0 or mem.recall_timeout_s <= 0:
             err("TARA_MEMORY_*_TIMEOUT_S", "must be positive")
+    if mem.knowledge_enabled:
+        if not mem.enabled:
+            err("TARA_KNOWLEDGE_ENABLED", "requires TARA_MEMORY_ENABLED; document RAG uses the same PostgreSQL database")
+        if not 1 <= mem.knowledge_search_limit <= 10:
+            err("TARA_KNOWLEDGE_SEARCH_LIMIT", "must be between 1 and 10")
+        if not 200 <= mem.knowledge_context_chars <= 20_000:
+            err("TARA_KNOWLEDGE_CONTEXT_CHARS", "must be between 200 and 20000")
+        if not 0 < mem.knowledge_timeout_s <= 30:
+            err("TARA_KNOWLEDGE_TIMEOUT_S", "must be between 0 and 30 seconds")
     if lim.local_context_tokens <= 0: err("TARA_LOCAL_CONTEXT_TOKENS", "must be positive")
     if i.local_max_tokens <= 0 or i.local_max_tokens >= lim.local_context_tokens > 0:
         err("TARA_LOCAL_MAX_TOKENS", "must be positive and smaller than the local context")

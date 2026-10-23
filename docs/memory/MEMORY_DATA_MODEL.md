@@ -1,6 +1,22 @@
 # Memory Data Model (PostgreSQL)
 
-**Status: Partially implemented (2026-10-20).** v1 ships `memory_records` and `schema_migrations` in `src/tara/memory/migrations/001_memory.sql`. The other tables below are proposed and have no migration. Every tenant-owned table is filtered by `tenant_id` (and v1 memory also by `user_id`) in every query.
+**Status: Partially implemented (2026-10-23).** Implemented tables: `memory_records`, `meeting_sessions`, `knowledge_sources`, `document_versions`, `document_chunks`, `acl_grants` and `schema_migrations` (migrations 001–006). Everything else in this document is proposed and has no migration. Every tenant-owned table is filtered by `tenant_id`, and memory/document reads also filter `user_id`/owner or a read grant. See [MEMORY_OPERATIONS](MEMORY_OPERATIONS.md), [DOCUMENT_RAG](DOCUMENT_RAG.md), [ADR-0016](../adr/0016-memory-retrieval-consolidation-recovery.md) and [ADR-0017](../adr/0017-document-rag.md).
+
+## Implemented today
+
+| Table | Columns that matter | Notes |
+|---|---|---|
+| `memory_records` | `id`, `tenant_id`, `user_id`, `session_id`, `meeting_id`, `kind`, `body`, `status`, `source`, `created_at`, `updated_at`, `expires_at`, `confidence`, `supersedes_id`, `metadata` (jsonb), `deleted_at`, generated `search` | Kinds: `fact`, `preference`, `project`, `decision`, `correction`, `note`, `episode`, `summary`, `action`. Status: `confirmed`, `candidate`, `superseded`. Expiry is enforced on read as well as by purge. |
+| `meeting_sessions` | `tenant_id`, `user_id`, `section_id`, `number`, `session_id`, `started_at`, `ended_at`, `interrupted`, `owner_pid`, `owner_host`, `deleted_at` | A section is the scope's `meeting_id`; each run is a numbered meeting. `ended_at IS NULL` means unfinished; `interrupted` means recovery closed it, not that it completed normally. |
+| `knowledge_sources` | `id`, `tenant_id`, `owner_user_id`, `section_id`, `title`, `source`, `approved`, `current_version`, `content_hash`, `effective_date`, `created_at`, `updated_at`, `deleted_at` | One document family. Identity is `(tenant, owner, coalesce(section,''), source)` among live rows. `section_id NULL` is user-wide. Soft delete hides immediately. |
+| `document_versions` | `id`, `tenant_id`, `source_id`, `version`, `content_hash`, `status`, `effective_date`, `created_at` | Immutable versions. `UNIQUE (source_id, version)` and `UNIQUE (source_id, content_hash)`; only `status='indexed'` at `current_version` is searchable. Reverting reuses an old row. |
+| `document_chunks` | `id`, `tenant_id`, `source_id`, `version_id`, `ordinal`, `heading_path`, `text`, generated `search` | Heading-aware chunks with a GIN full-text index. No embedding column. Cascades from the source/version. |
+| `acl_grants` | `id`, `tenant_id`, `subject_type`, `subject_id`, `resource_type`, `resource_id`, `permission`, `created_at` | Same-tenant read grants for documents (`subject_type='user'`, `resource_type='document'`, `permission='read'`). Owner access is implicit. |
+| `schema_migrations` | `version`, `applied_at` | Applied idempotently by `tara.memory.migrate`. |
+
+Indexes include live-row partial indexes by `(tenant_id, user_id, updated_at)`, `kind` and `status`, a session timeline index, GIN on `memory_records.search`, document identity and owner/section indexes, GIN on `document_chunks.search`, and the ACL subject index. Migration 005 adds the recovery columns and retrieval indexes; migration 006 adds the document tables.
+
+## Proposed (not built)
 
 ## Needed in v1
 | Table | Purpose | PK | Key relations | Retention |
@@ -11,17 +27,16 @@
 | `meeting_participants` | Participants seen in a meeting with role | `(meeting_id, participant_id)` | `meetings` | with meeting |
 | `conversation_events` | Final transcript events with attribution | `id` | `meeting_id` | with meeting; text optionally redacted earlier |
 | `memory_records` | Decisions, actions, open questions, summaries, statements | `id` | `meeting_id`, provenance | per kind (see below) |
-| `knowledge_sources` | A document family (a file, URL, wiki page) | `id` | `tenant_id` | until deleted |
-| `document_versions` | Immutable version of a source with content hash | `id` | `source_id` | latest N kept; older tombstoned |
-| `document_chunks` | Chunk text, embedding, tsvector, provenance | `id` | `version_id` | follows its version |
-| `indexing_jobs` | Idempotent ingestion/embedding work | `id` | `source_id`, `version_id` | short |
-| `acl_grants` | Who can read what | `id` | subject, resource | until revoked |
+| `indexing_jobs` | Idempotent ingestion/embedding work (not needed by the synchronous path today) | `id` | `source_id`, `version_id` | short |
 | `audit_log` | Append-only access and mutation record (no content) | `id` | `tenant_id` | long, config |
 
 ## Deferred (and why)
 `projects` and `teams` (use `acl_grants` with a `group` subject and a `scope_label` on sources until real need), `user_preferences` and recurring-participant memory (privacy design needed first), separate `embeddings` table (embedding lives on the chunk with `embedding_model`; split only when multiple models coexist), `meeting_summaries` and `decisions`/`action_items` as tables (they are `memory_records.kind` values until query patterns demand otherwise), retrieval result cache (see security doc; start with no persistent cache).
 
-## DDL sketch (illustrative; unrun, to be verified against a real Postgres in phase R1)
+## DDL sketch (target, illustrative; not the implemented schema)
+
+> **Read this first:** the SQL below is the original target sketch for organizations, meetings, events and a future vector leg. It is **not** what runs. The implemented schema is migrations `001`–`006`; in particular the implemented document tables have **no `embedding` column and no pgvector extension**, and their exact columns are in the table above and `006_knowledge.sql`. Use the migration as the authority.
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -84,8 +99,11 @@ CREATE TABLE audit_log (
 `users` and `meeting_participants` follow the same pattern and are omitted from the sketch. Row-Level Security policies keyed on `tenant_id` are proposed as defense in depth; Postgres RLS docs have not been read for this phase (Q-R6).
 
 ## Retrieval query shape
+
+**Implemented today:** one PostgreSQL FTS leg (no vector leg, no RRF). The SQL in `PostgresKnowledgeStore.search` filters `s.tenant_id`, `s.approved`, `s.deleted_at IS NULL`, the section rule, the owner/read-grant subquery, `v.status='indexed' AND v.version=s.current_version`, then ranks with `ts_rank_cd`; `KnowledgeService.rank_hits` re-ranks in Python. The sketch below is the future two-leg target.
+
 ```sql
--- both legs run with the same WHERE; fused in application code (RRF)
+-- target only: both legs run with the same WHERE; fused in application code (RRF)
 SELECT c.id, ts_rank_cd(c.tsv, q, 1|32) AS rank
 FROM document_chunks c
 JOIN document_versions v ON v.id = c.version_id AND v.status = 'indexed'
@@ -98,12 +116,13 @@ ORDER BY rank DESC LIMIT 20;
 ```
 Pgvector caveat: with an approximate index the filter applies after the index scan and can starve results (R1); hence exact search first and tenant-scoped partial indexes later.
 
-## Updates, invalidation, deletion
-- **Update:** new content hash creates a new `document_versions` row (`pending`). On successful indexing, one transaction sets `current_version_id`, marks the old version `superseded` and its chunks excluded. Failed indexing leaves the old version current. Old chunks are physically deleted by a sweeper after the grace period.
-- **Embedding model change:** new chunks with new `embedding_model`; queries only compare vectors of the same model.
-- **Deletion of a source:** set `deleted_at` (retrieval excludes immediately in the same transaction), enqueue hard delete of versions and chunks; `memory_records.source_chunk_ids` pointing at deleted chunks are flagged `source_removed`, and records that were derived only from that source are deleted; summaries that cited it are marked stale and regenerated or dropped; any retrieval cache entry keyed by the source or version is evicted.
-- **Meeting deletion:** cascades events and records; summaries live in `memory_records` so they cascade too; exported reports are outside the database and are tracked in the audit log for manual purge.
-- **Personal data erasure:** `users` erasure nulls identifying fields; `conversation_events.participant_id` stays as a pseudonymous id unless the request demands transcript removal.
+## Updates, invalidation, deletion (implemented)
+- **Update:** new content hash creates a new `document_versions` row and its chunks in one transaction; the source's `current_version` moves and old versions are marked `superseded`. Identical content is idempotent; reverting reuses the old immutable version. A failed write leaves the old version current. There is no background sweeper: old versions remain until the source is hard-deleted.
+- **Deletion of a source:** soft delete sets `deleted_at` and retrieval excludes it immediately. Hard delete removes the source and cascades versions, chunks and ACL rows. `purge_deleted` does the same for all of the owner's soft-deleted documents. No memory records are derived from documents, so there is nothing to rewrite.
+- **Embedding model change:** not applicable; there is no embedding model or vector column today.
+- **Meeting deletion:** memory sessions and records are handled by the memory path; documents are owned independently and are not deleted with a meeting.
+- **Personal data erasure:** not implemented at the user/organization level.
+- **Audit:** not implemented; mutations are counted by metrics but not tied to a user or document id in a log.
 
 ## Open questions
 Vector dimension must be fixed per column: changing models means a new column or table. Whether to partition `document_chunks` by tenant. Whether transcript text should be encrypted at the column level.

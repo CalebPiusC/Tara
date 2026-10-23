@@ -30,6 +30,8 @@ def migrate(dsn: str, *, schema: str | None = None) -> None:
         conn.execute(_sql("002_meetings.sql"))
         conn.execute(_sql("003_sessions.sql"))
         conn.execute(_sql("004_session_delete.sql"))
+        conn.execute(_sql("005_recovery_and_ranking.sql"))
+        conn.execute(_sql("006_knowledge.sql"))
         conn.commit()
 
 

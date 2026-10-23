@@ -22,12 +22,14 @@ class Minutes:
     actions: tuple[MemoryRecord, ...]
     open_questions: tuple[MemoryRecord, ...]
     unconfirmed: tuple[MemoryRecord, ...]
+    proposals: tuple[MemoryRecord, ...] = ()
     summaries: tuple[MemoryRecord, ...] = ()
     excerpt: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
     @property
     def empty(self) -> bool:
-        return not (self.decisions or self.actions or self.open_questions or self.unconfirmed or self.summaries)
+        return not (self.decisions or self.actions or self.open_questions or self.unconfirmed or self.proposals
+                    or self.summaries)
 
 
 def collect_minutes(memory: MeetingMemory, scope: Scope, *, title: str = "Meeting minutes",
@@ -43,6 +45,7 @@ def collect_minutes(memory: MeetingMemory, scope: Scope, *, title: str = "Meetin
         actions=tuple(r for r in confirmed if r.kind == "action_item"),
         open_questions=tuple(r for r in records if r.kind == "open_question"),
         unconfirmed=tuple(r for r in candidates if r.kind in ("decision", "action_item")),
+        proposals=tuple(r for r in records if r.kind == "proposal"),
         summaries=tuple(r for r in records if r.kind == "summary"),
         excerpt=tuple(list(working.turns)[-excerpt_turns:]) if working is not None else ())
 
@@ -66,6 +69,7 @@ def minutes_facts(m: Minutes, *, include_excerpt: bool = True) -> dict[str, Any]
         "Confirmed decisions": [_line(r) for r in m.decisions] or ["None recorded"],
         "Confirmed action items": [_line(r) for r in m.actions] or ["None recorded"],
         "Open questions": [_line(r) for r in m.open_questions] or ["None recorded"],
+        "Proposals (not agreed)": [_line(r) for r in m.proposals] or ["None"],
         "Unconfirmed items (said in the meeting but never confirmed)": [f"{r.kind}: {_line(r)}" for r in m.unconfirmed] or ["None"],
     }
     if m.summaries:

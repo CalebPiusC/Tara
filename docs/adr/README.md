@@ -15,4 +15,6 @@
 | [0012](0012-unified-runtime-routing.md) | Unified runtime, rule-bounded routing | Proposed |
 | [0013](0013-gemini-live-primary.md) | Gemini Live primary, local models dormant | Accepted (unverified live) |
 | [0014](0014-orchestration-tools.md) | Orchestration as read-only tools in the Live path | Accepted (implemented offline; live search unverified) |
-| [0015](0015-automatic-meeting-memory.md) | Automatic, meeting-scoped memory | Accepted (implemented offline and on real PostgreSQL; spoken behaviour unverified) |
+| [0015](0015-automatic-meeting-memory.md) | Automatic, meeting-scoped memory | Accepted (implemented offline and on real PostgreSQL; retrieval/consolidation extended by 0016) |
+| [0016](0016-memory-retrieval-consolidation-recovery.md) | Retrieval, consolidation, corrections and restart recovery | Accepted (implemented offline and on real PostgreSQL; live behaviour unverified; document-RAG deferral superseded by 0017) |
+| [0017](0017-document-rag.md) | Document RAG with approved documents, versions and read ACLs | Accepted (implemented offline and on real PostgreSQL; live Gemini tool calling unverified) |

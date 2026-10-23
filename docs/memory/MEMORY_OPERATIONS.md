@@ -1,29 +1,39 @@
-# Memory Operations (v1)
+# Memory Operations (v2)
 
-**Status: Implemented and tested against a real local PostgreSQL on 2026-10-20.** This covers explicit long-term memory only. Document RAG, embeddings, Redis, automatic consolidation and persisted meeting notes are not implemented. Design: [MEMORY_AND_RAG](MEMORY_AND_RAG.md). Decision: [ADR-0012](../adr/0012-memory-v1-postgres-fts.md).
+**Status: Implemented and tested offline plus against a real local PostgreSQL on 2026-10-23.** This covers long-term memory, automatic meeting notes, cross-meeting retrieval inside a section, consolidation, corrections, startup context, restart recovery and approved-document RAG (ingestion, chunks, versions, read ACLs, section scope, deletion and the Live tool). Metrics are suite results, not voice-latency measurements. Design: [MEMORY_AND_RAG](MEMORY_AND_RAG.md), [DOCUMENT_RAG](DOCUMENT_RAG.md). Decisions: [ADR-0012](../adr/0012-memory-v1-postgres-fts.md), [ADR-0015](../adr/0015-automatic-meeting-memory.md), [ADR-0016](../adr/0016-memory-retrieval-consolidation-recovery.md), [ADR-0017](../adr/0017-document-rag.md). Real Gemini tool calling is still unverified.
 
 ## What it does
 
-- Stores an explicitly requested memory (`remember_memory`) in PostgreSQL.
-- Recalls relevant memories (`recall_memory`) with PostgreSQL full-text search plus a short literal fallback.
-- Forgets a memory (`forget_memory`) by id or exact text, after an explicit request.
-- Injects a small, deduplicated, character-capped memory block into a new Live session's system instruction.
-- Enforces `tenant_id` and `user_id` inside every query; the app builds the scope, never the model.
-- Keeps writes off the audio path. A write runs in the existing live tool task and returns a tool result; a failure is reported as an error.
+- Stores an explicitly requested memory (`remember_memory`) in PostgreSQL, or in the in-memory store used by tests.
+- Stores automatic meeting notes without being asked: SESSION-tier decisions, action items, open questions and proposals detected in a finished turn go to the live meeting memory **and** to the durable store as candidates. A process exit no longer loses them.
+- Extracts transcript chunks, a summary and verified candidate facts at checkpoints and at the end; each fact must carry a verbatim quote from the transcript.
+- Keeps proposals separate from decisions. "We should probably use PostgreSQL" is stored as a `note` candidate with `metadata.tentative=true`; only committed wording such as "we have decided" can produce a `decision` candidate. Candidates remain unconfirmed until explicitly promoted or seen again in a later meeting.
+- Links an explicit correction to the record it replaces when the target can be identified confidently. The old row stays with `status=superseded`, `metadata.superseded_by`, its source and timestamps. Ambiguous corrections keep every candidate and set `metadata.possible_conflict` and `metadata.correction_candidates` instead of guessing.
+- Consolidates only near-identical durable records (token Jaccard ≥ 0.9). Numbers are significant, so "Decision 1: ship" and "Decision 2: ship" are never merged. Merging supersedes a duplicate and records `metadata.duplicate_of`; it never deletes history.
+- Retrieves across every meeting in the same section with PostgreSQL full-text search plus a deterministic Python re-ranker: keyword rarity, phrase match, confirmation status, kind, recency half-life, conflict flags and near-duplicate diversity.
+- Understands spoken time filters ("today", "yesterday", "last week", "last 3 days") and kind hints ("what did we decide", "what did I promise", "summaries") and applies them before ranking. A filter with no keyword match falls back to the newest items inside that window.
+- Injects a bounded, source-labelled startup block: one summary per meeting first, then corrections, decisions, open actions, other confirmed items, candidates, and only then a few transcript chunks. Meeting number and date are included when known.
+- Recovers meetings a dead process left open: they are closed at their last activity, marked `interrupted=true`, and shown as "recovered after a restart". A session owned by another process that is still alive on the same host is left alone.
+- Enforces `tenant_id`, `user_id` and the optional section slug inside every store query. The scope is built by the application from authenticated identity, never from speech or model output.
+- Ingests approved UTF-8 text/Markdown as heading-aware chunks, keeps immutable versions and returns only the current approved version. Search is PostgreSQL FTS plus a deterministic Python re-ranker (no embeddings).
+- Applies document authorization inside SQL: tenant, owner or same-tenant read grant, `approved=true`, section (`NULL` = user-wide), not deleted and current version. The owner may approve, share, revoke, delete or purge; a reader cannot manage.
+- Exposes `search_knowledge` only when `TARA_KNOWLEDGE_ENABLED=1` and memory is enabled. An empty result and a failed lookup are distinct; the instruction requires a citation and forbids guessing.
+- Keeps extraction, consolidation, summaries, recovery and document queries off the audio path. Startup work and tool calls are bounded by `TARA_MEMORY_*_TIMEOUT_S` and `TARA_KNOWLEDGE_TIMEOUT_S`; a failure returns no context or a tool error instead of blocking voice.
 
 ## What it does not do
 
-- It does not extract memories automatically from ordinary conversation.
-- It does not persist `voice.memory.InMemoryMeetingMemory` notes; they still disappear on exit.
-- It does not embed text or use pgvector; paraphrases may be missed.
+- It does not embed text or use pgvector. Paraphrases with no shared words can still be missed; memory and documents always keep a keyword path.
+- It does not ingest PDF, Word, HTML, spreadsheets, images or URLs. Document RAG reads UTF-8 `.txt`, `.md` and `.markdown` only; there is no crawler or OCR.
+- It does not do automatic per-turn document retrieval or a full Live context assembler. The model must call `search_knowledge`.
 - It does not use Redis. The app is single-process and has no measured need for a second store.
-- It does not implement per-document ACLs, PostgreSQL Row-Level Security, audit logs or encryption at rest.
-- It does not provide authentication. The local demo hardcodes `tenant=local` and `user=you`; a real deployment must build `MemoryScope` from authenticated identity, never from speech or model output.
-- It does not prove that the real Gemini model calls the tools correctly. Only fake-backend tests have run.
+- It does not implement document write/admin/group ACLs, PostgreSQL Row-Level Security, audit logs or encryption at rest. Document read ACLs are application-enforced and owner-managed.
+- It does not provide authentication. The local demo hardcodes a local tenant and user; a real deployment must build `MemoryScope` from authenticated identity.
+- It does not prove that the real Gemini model calls the tools correctly or cites documents. Only fake-backend tests have run.
+- It does not claim measured latency or retrieval quality. The ranking weights are starting values in `src/tara/memory/retrieval.py` and `src/tara/memory/knowledge.py`.
 
 ## Prerequisites
 
-- PostgreSQL running locally (tested with 16.14).
+- PostgreSQL running locally (tests ran against PostgreSQL 16).
 - The optional Python extra: `.venv/bin/python -m pip install -e '.[memory]'` (installs `psycopg[binary,pool]`).
 - A dedicated database. Do not point `TARA_MEMORY_DATABASE_URL` at an unrelated application's database.
 
@@ -36,11 +46,11 @@ createdb tara_memory
 # 2. install the optional driver
 .venv/bin/python -m pip install -e '.[memory]'
 
-# 3. create/update the schema (idempotent)
+# 3. create/update the schema (idempotent; applies 001..006)
 TARA_MEMORY_DATABASE_URL=postgresql:///tara_memory .venv/bin/python -m tara.memory.migrate
 ```
 
-The migration creates `memory_records` and `schema_migrations`. It does not create organizations, users, meetings, documents, ACLs or audit tables.
+Migration `005_recovery_and_ranking.sql` adds `meeting_sessions.interrupted`, `owner_pid`, `owner_host` and the indexes used by filtered retrieval. Migration `006_knowledge.sql` adds the document tables, full-text index and read ACLs. Both preserve existing rows.
 
 ## Configuration
 
@@ -50,71 +60,109 @@ The migration creates `memory_records` and `schema_migrations`. It does not crea
 | `TARA_MEMORY_DATABASE_URL` | empty | `postgresql://...` or `postgres://...`. Required when enabled. Never logged or included in `repr`. |
 | `TARA_MEMORY_SCHEMA` | empty (public) | Optional schema; the integration tests use a throwaway schema. |
 | `TARA_MEMORY_SEARCH_LIMIT` | `5` | Startup block candidate count and default recall limit. |
-| `TARA_MEMORY_CONTEXT_CHARS` | `1200` | Character cap for the startup block; not a model token limit. |
+| `TARA_MEMORY_CONTEXT_CHARS` | `3500` | Character cap for the startup block; not a model token limit. |
 | `TARA_MEMORY_STARTUP_CONTEXT` | `1` | Inject recent memories when a Live session opens. |
 | `TARA_MEMORY_WRITE_TIMEOUT_S` | `3` | Bound on a memory write. |
 | `TARA_MEMORY_RECALL_TIMEOUT_S` | `2` | Bound on recall/startup retrieval. |
+| `TARA_KNOWLEDGE_ENABLED` | `0` | Registers `search_knowledge`; requires memory enabled and the same PostgreSQL URL. |
+| `TARA_KNOWLEDGE_SEARCH_LIMIT` | `4` | Passages returned per document search (1–10). |
+| `TARA_KNOWLEDGE_CONTEXT_CHARS` | `2500` | Character cap for one document tool result (200–20,000). |
+| `TARA_KNOWLEDGE_TIMEOUT_S` | `2` | Bound on a document search. |
+| `TARA_EPISODE_RETENTION_DAYS` | `90` | Transcript chunks. |
+| `TARA_FACT_RETENTION_DAYS` | `180` | Unconfirmed extracted facts. |
 
-`RuntimeSettings.redacted()` reports only `database_url: set|missing`; the URL is a secret-bearing value and is not logged.
+`RuntimeSettings.redacted()` reports only `database_url: set|missing`; the URL is a secret-bearing value and is not logged. Knowledge settings are shown without the URL.
 
-## Data model (v1)
+## Data model
 
-`memory_records`:
+Implemented tables (full details in [MEMORY_DATA_MODEL](MEMORY_DATA_MODEL.md)):
 
-| Column | Purpose |
-|---|---|
-| `id` (uuid) | Stable identifier used by `forget_memory`. |
-| `tenant_id`, `user_id` | Authorization boundary; both are in every query. |
-| `session_id`, `meeting_id` | Provenance, not authorization. |
-| `kind` | `fact`, `preference`, `project`, `decision`, `correction`, `note`. |
-| `body` | The stored text (max 4000 characters in the service). |
-| `status` | `confirmed`, `candidate`, `superseded`. An explicit request is `confirmed`. |
-| `source` | Required provenance string, e.g. `local-voice-demo:turn:2`. |
-| `created_at`, `updated_at`, `expires_at` | Lifecycle. Expired rows are excluded from retrieval. |
-| `confidence` | 0..1; explicit saves default to 1.0. |
-| `supersedes_id` | Points at the older record for an explicit correction. |
-| `metadata` (jsonb) | Reserved; v1 writes `{}`. |
-| `deleted_at` | Soft delete; `forget_memory` hides the row and retrieval excludes it. |
-| `search` (tsvector) | Generated English full-text index (`to_tsvector('english', body)`). |
+- `memory_records`: `id`, `tenant_id`, `user_id`, `session_id`, `meeting_id`, `kind`, `body`, `status`, `source`, `created_at`, `updated_at`, `expires_at`, `confidence`, `supersedes_id`, `metadata`, `deleted_at`, generated `search`.
+- `meeting_sessions`: numbered meetings inside a section, `started_at`, `ended_at`, `interrupted`, `owner_pid`, `owner_host`.
+- `knowledge_sources`: document family, owner, optional section, `title`, `source`, `approved`, `current_version`, `content_hash`, `effective_date`, `deleted_at`.
+- `document_versions`: immutable `version`, `content_hash`, `status`, `effective_date`.
+- `document_chunks`: `ordinal`, `heading_path`, `text`, generated `search` tsvector, foreign keys to source and version.
+- `acl_grants`: same-tenant `subject_type='user'`, `subject_id`, `resource_type='document'`, `resource_id`, `permission='read'`.
+- `schema_migrations`.
 
-Indexes: `(tenant_id, user_id, updated_at DESC)` partial on live rows, GIN on `search`, and `(tenant_id, user_id, session_id)`.
+Canonical persisted kinds: `fact`, `preference`, `project`, `decision`, `correction`, `note`, `episode`, `summary`, `action`. Live note kinds (`decision`, `action_item`, `open_question`, `proposal`, `summary`) are translated once in `src/tara/memory/kinds.py`; `action_item` is accepted from older code, model output and tools but is always stored as `action`.
 
-## Data flow
+`status` is only `confirmed`, `candidate` or `superseded`. Confidence, confirmation, tentative wording, conflict flags and duplicate links are separate dimensions in `metadata`; one field is never overloaded for another meaning.
 
-1. A new Live session calls `MemoryService.startup_context(scope)` once. It lists recent records, deduplicates, caps characters and appends a labeled block to the system instruction. A DB failure returns `""` and increments `memory_startup_failures`; the voice session still opens.
-2. A final input transcript is observed by `MemoryWriteGate`. Only phrases such as "remember this", "save this to memory", "don't forget this" open `remember`; only "forget that", "delete the memory", etc. open `forget`.
-3. The model may call `remember_memory(text, kind)`. The handler re-checks the gate, calls `MemoryService.remember`, and returns `status=saved` only after the store commit. If the gate is closed, the tool returns `PermissionDenied`; if the DB fails, the tool returns `tool_error:<Type>` and the instruction says to report failure.
-4. `recall_memory(query, limit)` is read-only. It searches within the bound scope and returns ids, text, kind, source and update time. No result means the model should say it does not remember.
-5. `forget_memory(memory_id|text)` requires the forget gate. It soft-deletes and returns `deleted` or `not_found`.
+## Retrieval
+
+1. `MemoryService.recall` parses the spoken query into text plus optional `since`/`until` and kind filters (`retrieval.parse_query`).
+2. The store searches only inside the bound scope, excludes superseded and expired rows, and applies the kind/time filters in SQL (PostgreSQL) or the equivalent predicate (in-memory).
+3. `retrieval.rank_hits` re-ranks candidates: FTS rank, rarity-weighted keyword coverage, phrase match, status, kind, recency (45-day half-life), conflict penalty and a diversity pass that removes near-duplicates.
+4. If a time or kind filter produced no keyword candidates, the newest records inside that window are used instead, labelled as `recent` rather than an exact match.
+5. `recall_memory` returns id, text, kind, source, status, label, meeting number/time, and a conflict warning. The model is told to say plainly when nothing was found.
+
+Cross-meeting recall happens inside one section (scope `meeting_id` is the section). Records with no section are global for that user. Another user or tenant never matches, even with identical text.
+
+## Document RAG operations
+
+Use `tara knowledge` against the same database; run `tara migrate` first. The CLI path defaults to `TARA_MEMORY_DATABASE_URL`, tenant `local` (or `TARA_MEMORY_TENANT`) and user `local-user` (or `TARA_MEMORY_USER`). It never prints the URL.
+
+```bash
+tara knowledge add ./handbook.md                  # approved by default
+tara knowledge add ./pricing.md --draft           # invisible until approved
+tara knowledge add ./onboarding.md --section onboarding
+tara knowledge list
+tara knowledge search "refund window"
+tara knowledge approve <document-id>
+tara knowledge share <document-id> alice
+tara knowledge revoke <document-id> alice
+tara knowledge delete <document-id>               # soft delete
+tara knowledge delete <document-id> --hard        # cascade versions, chunks, ACLs
+tara knowledge purge --yes
+```
+
+Ingestion accepts UTF-8 `.txt`, `.md` and `.markdown`; other formats are refused. Chunking is heading-aware (1,200 characters, 150-character overlap, 2,000 chunks maximum). Identity is `(tenant, owner, section, source)`; identical content is idempotent, changed content creates a new immutable version, and reverting reuses an older version. Search sees only `approved=true`, the current version, the owner or a same-tenant read grant, and the caller's section (`NULL` section is user-wide). Soft delete hides immediately; hard delete and `purge_deleted` remove all associated rows. Full contract: [DOCUMENT_RAG](DOCUMENT_RAG.md).
+
+`search_knowledge` returns `count`, passages with title, version, effective date, source and citation, or a `count=0` note. A store failure is a tool error, not an empty result. The tool is registered only when `TARA_KNOWLEDGE_ENABLED=1` and memory is enabled; an injected service is used by tests.
+
+## Consolidation, corrections and promotion
+
+- An exact duplicate save is idempotent. A repeated automatic candidate is reinforced (`metadata.sightings`), not duplicated.
+- A candidate the recorder sees again in a later meeting is promoted to confirmed and stops expiring, unless it is marked tentative (a repeated proposal is still not agreement).
+- `consolidate(scope)` merges only near-identical durable records; it is bounded to the newest 200 and runs once at session start in a background task.
+- An explicit correction resolves its target from the correction text. If two records are nearly equally plausible, both are preserved and the correction is flagged. A model-proposed `corrects` reference is resolved the same way; a reference to a record Tara does not hold is ignored.
+- Superseding never deletes: the old row keeps its provenance and `status=superseded`, and `get` can still read it for historical questions.
+
+## Startup, meetings and recovery
+
+On start: `start_session` assigns the next meeting number, `recover` closes abandoned meetings (interrupted, end time = last activity), expired rows are purged, and consolidation runs in the background. `meeting_brief` tells the model which meeting this is and lists earlier meetings with summaries and anything they left open. `startup_context` then adds the bounded memory block. Neither call is allowed to stop the voice session.
+
+A process exit calls `end_session` so a normal meeting is marked completed (`interrupted=false`). Recovery only touches rows with no end time. Because owner pid/host are recorded, a second live process on the same host is not closed by mistake. A row from another host cannot be liveness-checked; the single-process deployment assumption is documented in ADR-0016.
 
 ## Observability
 
-Added counters: `memory_writes`, `memory_deduplicated`, `memory_recalls`, `memory_forgets`, `memory_forget_misses`, `memory_write_failures`, `memory_recall_failures`, `memory_forget_failures`, `memory_startup_failures`, `memory_startup_context_injected`, `memory_close_failures`. Gauges: `memory_recall_results`. Latency observations: `memory_write_ms`, `memory_recall_ms`, `memory_forget_ms`, `memory_startup_ms`.
+Counters include: `memory_writes`, `memory_deduplicated`, `memory_conflicts_flagged`, `memory_corrections_linked`, `memory_consolidated`, `memory_recovered_sessions`, `memory_recalls`, `memory_recall_filtered`, `memory_forgets`, `memory_forget_misses`, `memory_write_failures`, `memory_recall_failures`, `memory_forget_failures`, `memory_startup_failures`, `memory_consolidate_failures`, `memory_recovery_failures`, `memory_session_start_failures`. Gauges: `memory_recall_results`. Latency observations: `memory_write_ms`, `memory_recall_ms`, `memory_forget_ms`, `memory_startup_ms`.
+
+Document counters: `knowledge_documents_ingested`, `knowledge_chunks_ingested`, `knowledge_searches`, `knowledge_search_failures`, `knowledge_ingest_failures`, `knowledge_documents_deleted`, `knowledge_documents_purged`, `knowledge_documents_approved`, `knowledge_documents_unapproved`, `knowledge_documents_shared`, `knowledge_documents_unshared`. Latency: `knowledge_ingest_ms`, `knowledge_search_ms`.
 
 No memory text, query or URL is logged. `--debug` prints only counters and event metadata.
 
-## Measured results (2026-10-20)
+## Measured results (2026-10-23)
 
-Commands and results from this workspace:
+Commands run in this workspace:
 
 ```text
 .venv/bin/python -m pytest -q
-389 passed, 6 skipped, 4 deselected in 19.91s
+718 passed, 10 skipped, 7 deselected in 85.23s
 
-TARA_TEST_DATABASE_URL=postgresql:///tara_memory_test \
+TARA_TEST_DATABASE_URL=postgresql:///postgres \
   .venv/bin/python -m pytest -m db tests/memory/test_memory_postgres.py -q
-6 passed in 0.21s
+10 passed in 0.35s
 
 .venv/bin/ruff check src tests
 All checks passed!
 
 .venv/bin/mypy src
-Success: no issues found in 68 source files
+Success: no issues found in 140 source files
 ```
 
-Those timings are test-suite timings, **not** a voice latency benchmark. No first-audio measurement was taken with memory enabled. The design keeps the startup query outside audio streaming and the recall query inside the tool task; measure real first-audio and recall latency on the target machine before making a latency claim.
-
-A separate two-process durability check (two `python -c` children against the same throwaway schema) saved a memory in the first process and recalled the same id in the second process: **1 hit**. That is the evidence for cross-session durability; it does not test the Gemini model.
+These are suite timings, **not** a voice latency benchmark. No first-audio measurement was taken with memory enabled. PostgreSQL tests use a throwaway schema and a real local server; they cover filtered retrieval, implicit correction, recovery state and a two-store restart with a correction.
 
 ## Failure modes
 
@@ -124,22 +172,26 @@ A separate two-process durability check (two `python -c` children against the sa
 | PostgreSQL down during a save | Tool returns an error; the model is instructed not to claim the save succeeded. |
 | PostgreSQL down during recall | Tool returns an error; the model must say it cannot recall, not invent. |
 | Timeout | Bounded by `TARA_MEMORY_*_TIMEOUT_S`; reported as a tool error or empty startup context. |
-| Memory superseded | Old row remains with `status=superseded` and its provenance; retrieval excludes it. |
-| Wrong tenant/user | Query returns nothing; canary tests cover another user and another tenant. |
-| Driver missing | `PostgresMemoryStore` raises `ConfigError` at construction with the install command. |
+| Memory superseded | Old row remains with `status=superseded` and its provenance; retrieval excludes it, `get` still reads it. |
+| Ambiguous correction | No record is superseded; both candidates and the correction are flagged `possible_conflict`. |
+| Wrong tenant/user/section | Query returns nothing; canary tests cover another user, tenant, section and a revoked document grant. |
+| Document not approved or deleted | Search excludes it; `get` returns nothing to a reader. |
+| Document store unavailable | `search_knowledge` returns a tool error; the model must say the lookup failed, not that no document exists. |
+| Unsupported document format | CLI refuses it; no partial ingestion. |
+| Driver missing | `PostgresMemoryStore`/`PostgresKnowledgeStore` raises `ConfigError` at construction with the install command. |
 
 ## Tests
 
-- Offline: `tests/memory/test_memory_core.py` covers service rules, isolation, dedupe, correction, expiry, rendering, intent detection, tool authorization and failure reporting.
-- Engine integration: `tests/memory/test_memory_engine.py` covers the transcript gate, tool results and startup-context injection with the fake provider.
-- App wiring: `tests/voice/test_voice_app_settings.py` covers settings validation/redaction, tool registration and startup context.
-- Real PostgreSQL: `tests/memory/test_memory_postgres.py` creates a throwaway schema, runs the migration, and verifies commit, fresh-store recall, isolation, correction, expiry, concurrent writes and failure honesty. It is skipped unless `TARA_TEST_DATABASE_URL` is set.
+- Offline quality: `tests/memory/test_memory_retrieval.py` covers kind translation, proposal vs decision, digest validation, durable session notes, correction linking and ambiguity, consolidation, numbered-record safety, temporal filters, ranking, startup labels, recovery and tool output.
+- Core: `tests/memory/test_memory_core.py` covers service rules, isolation, dedupe, expiry, rendering, intent and failure reporting.
+- Engine: `tests/memory/test_memory_engine.py` covers the transcript gate, tool results and startup injection with the fake provider.
+- Documents offline: `tests/memory/test_knowledge.py` covers chunking, approval, tenant/user/section isolation, read grants, draft sharing, versions/reverts, idempotency, soft/hard deletion, formats, context budgets, the live tool and failure honesty.
+- Live wiring: `tests/voice/test_voice_app_settings.py` checks the `search_knowledge` grant, instruction and health field; `tests/tools/test_catalog.py` keeps the catalogue in step with the source `ToolDef`.
+- Real PostgreSQL: `tests/memory/test_memory_postgres.py` and `tests/memory/test_knowledge_postgres.py` create throwaway schemas, migrate them, and verify commit, fresh-store reads, isolation, filters, correction/recovery, document ACL/versions/purge and failure honesty. They are skipped unless `TARA_TEST_DATABASE_URL` is set (marker `db`).
 
 ## Remaining work
 
-1. Verify real Gemini Live tool calling for save/recall/forget with a human listening test.
-2. Add automatic consolidation (candidate extraction, provenance, promotion) after turns, bounded and asynchronous.
-3. Add document ingestion, chunking and a retrieval evaluation set; only then decide whether pgvector is justified.
-4. Persist meeting notes and session summaries, with retention and authorization.
-5. Add ACL tables/RLS and an audit log before multi-tenant use.
-6. Measure startup and recall latency with memory enabled; tune `TARA_MEMORY_CONTEXT_CHARS` and search limits from measurements.
+1. Verify real Gemini Live tool calling for save/recall/forget/correction and `search_knowledge` with a human listening test, including citation behaviour.
+2. Evaluate memory and document retrieval quality with a labelled question set; only then tune ranking weights or justify embeddings/pgvector.
+3. Add document admin/write/group ACLs, RLS and an audit log before multi-tenant use.
+4. Measure startup, recall and document-search latency with memory/knowledge enabled on the target machine.

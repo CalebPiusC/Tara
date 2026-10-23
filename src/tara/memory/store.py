@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 import re
+import socket
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, Protocol
@@ -18,6 +20,20 @@ from ..core.errors import ConfigError
 from .models import MeetingSession, MemoryHit, MemoryItem, MemoryScope, is_expired, normalize_text, tokens, utcnow
 
 _LIKE_SPECIAL = re.compile(r"([%_\\])")
+_HOST = socket.gethostname()[:64]
+
+
+def _pid_alive(pid: int) -> bool:
+    """True when a process on this host is still running. Used so recovery never closes a live meeting."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class MemoryStore(Protocol):
@@ -25,13 +41,16 @@ class MemoryStore(Protocol):
     async def update(self, item: MemoryItem) -> None: ...
     async def get(self, scope: MemoryScope, memory_id: str) -> MemoryItem | None: ...
     async def find_exact(self, scope: MemoryScope, text: str) -> MemoryItem | None: ...
-    async def search(self, scope: MemoryScope, query: str, limit: int = 5) -> list[MemoryHit]: ...
-    async def list_recent(self, scope: MemoryScope, limit: int = 20) -> list[MemoryItem]: ...
+    async def search(self, scope: MemoryScope, query: str, limit: int = 5, *, kinds: tuple[str, ...] = (),
+                     since: datetime | None = None, until: datetime | None = None) -> list[MemoryHit]: ...
+    async def list_recent(self, scope: MemoryScope, limit: int = 20, *, kinds: tuple[str, ...] = (),
+                          since: datetime | None = None, until: datetime | None = None) -> list[MemoryItem]: ...
     async def delete(self, scope: MemoryScope, memory_id: str) -> bool: ...
     async def list_meetings(self, scope: MemoryScope) -> list[dict[str, Any]]: ...
     async def purge_expired(self, scope: MemoryScope) -> int: ...
     async def start_session(self, scope: MemoryScope, session_id: str, started_at: datetime) -> MeetingSession: ...
     async def end_session(self, scope: MemoryScope, session_id: str, ended_at: datetime) -> None: ...
+    async def recover_sessions(self, scope: MemoryScope, current_session_id: str) -> list[MeetingSession]: ...
     async def list_sessions(self, scope: MemoryScope) -> list[MeetingSession]: ...
     async def list_session_items(self, scope: MemoryScope, session_id: str, limit: int = 80) -> list[MemoryItem]: ...
     async def delete_session(self, scope: MemoryScope, session_id: str) -> int: ...
@@ -69,12 +88,16 @@ class InMemoryMemoryStore:
                 return item
         return None
 
-    async def search(self, scope: MemoryScope, query: str, limit: int = 5) -> list[MemoryHit]:
+    async def search(self, scope: MemoryScope, query: str, limit: int = 5, *, kinds: tuple[str, ...] = (),
+                     since: datetime | None = None, until: datetime | None = None) -> list[MemoryHit]:
+        if not query.strip():
+            items = await self.list_recent(scope, limit, kinds=kinds, since=since, until=until)
+            return [MemoryHit(i, 0.0, "recent") for i in items]
         q = tokens(query)
         phrase = normalize_text(query)
         ranked: list[MemoryHit] = []
         for item in self._owned(scope):
-            if item.status == "superseded" or is_expired(item):
+            if not _matches(item, kinds, since, until):
                 continue
             overlap = len(q & tokens(item.text))
             if phrase and phrase in normalize_text(item.text):
@@ -84,9 +107,10 @@ class InMemoryMemoryStore:
         ranked.sort(key=lambda h: (-h.score, -h.item.updated_at.timestamp(), h.item.id))
         return ranked[: max(1, limit)]
 
-    async def list_recent(self, scope: MemoryScope, limit: int = 20) -> list[MemoryItem]:
-        items = sorted((i for i in self._owned(scope) if i.status != "superseded" and not is_expired(i)),
-                       key=lambda i: (i.updated_at, i.id), reverse=True)
+    async def list_recent(self, scope: MemoryScope, limit: int = 20, *, kinds: tuple[str, ...] = (),
+                          since: datetime | None = None, until: datetime | None = None) -> list[MemoryItem]:
+        items = [i for i in self._owned(scope) if _matches(i, kinds, since, until)]
+        items.sort(key=lambda i: (i.updated_at, i.id), reverse=True)
         return items[: max(1, limit)]
 
     async def delete(self, scope: MemoryScope, memory_id: str) -> bool:
@@ -115,7 +139,8 @@ class InMemoryMemoryStore:
         for r in rows:
             if r.session_id == session_id:
                 return r
-        row = MeetingSession(max((r.number for r in rows), default=0) + 1, session_id, started_at)
+        row = MeetingSession(max((r.number for r in rows), default=0) + 1, session_id, started_at,
+                             interrupted=False, owner_pid=os.getpid(), owner_host=_HOST)
         rows.append(row)
         return row
 
@@ -123,7 +148,27 @@ class InMemoryMemoryStore:
         rows = self._section(scope)
         for i, r in enumerate(rows):
             if r.session_id == session_id:
-                rows[i] = MeetingSession(r.number, r.session_id, r.started_at, ended_at)
+                rows[i] = MeetingSession(r.number, r.session_id, r.started_at, ended_at, interrupted=False,
+                                         owner_pid=r.owner_pid, owner_host=r.owner_host)
+
+    async def recover_sessions(self, scope: MemoryScope, current_session_id: str) -> list[MeetingSession]:
+        """Close meetings whose process did not end them, keeping their last activity as the end time.
+
+        A meeting owned by another process that is still alive on this host is left alone.
+        """
+        rows = self._section(scope)
+        recovered: list[MeetingSession] = []
+        for i, r in enumerate(rows):
+            if r.ended_at is not None or r.session_id == current_session_id:
+                continue
+            if r.owner_host == _HOST and r.owner_pid not in (0, os.getpid()) and _pid_alive(r.owner_pid):
+                continue
+            last = max((item.updated_at for item in self._owned(scope) if item.session_id == r.session_id),
+                       default=r.started_at)
+            rows[i] = MeetingSession(r.number, r.session_id, r.started_at, max(r.started_at, last), interrupted=True,
+                                     owner_pid=r.owner_pid, owner_host=r.owner_host)
+            recovered.append(rows[i])
+        return recovered
 
     async def list_sessions(self, scope: MemoryScope) -> list[MeetingSession]:
         return [r for r in self._section(scope)
@@ -248,13 +293,25 @@ class PostgresMemoryStore:
             row = await cur.fetchone()
             return _row_to_item(row) if row else None
 
-    async def search(self, scope: MemoryScope, query: str, limit: int = 5) -> list[MemoryHit]:
+    async def search(self, scope: MemoryScope, query: str, limit: int = 5, *, kinds: tuple[str, ...] = (),
+                     since: datetime | None = None, until: datetime | None = None) -> list[MemoryHit]:
         q = query.strip()
         if not q:
-            items = await self.list_recent(scope, limit)
+            items = await self.list_recent(scope, limit, kinds=kinds, since=since, until=until)
             return [MemoryHit(i, 0.0, "recent") for i in items]
-        pool = await self._ensure()
-        async with pool.connection() as conn:
+        pool = list(kinds) or None
+        filters = """ AND (%s::text[] IS NULL OR kind = ANY(%s))
+                      AND (%s::timestamptz IS NULL OR created_at >= %s)
+                      AND (%s::timestamptz IS NULL OR created_at < %s)"""
+
+        def filter_params() -> tuple[Any, ...]:
+            # A fresh list each time: psycopg adapts lists per parameter.
+            first = list(pool) if pool is not None else None
+            second = list(pool) if pool is not None else None
+            return (first, second, since, since, until, until)
+
+        db = await self._ensure()
+        async with db.connection() as conn:
             cur = await conn.execute(
                 """SELECT *, ts_rank_cd(search, q) AS rank
                    FROM memory_records, websearch_to_tsquery('english', %s) q
@@ -262,10 +319,10 @@ class PostgresMemoryStore:
                      AND status <> 'superseded'
                      AND (expires_at IS NULL OR expires_at > now())
                      AND (search @@ q OR body ILIKE %s)
-                     AND (%s::text IS NULL OR meeting_id IS NULL OR meeting_id = %s)
+                     AND (%s::text IS NULL OR meeting_id IS NULL OR meeting_id = %s)""" + filters + """
                    ORDER BY rank DESC, updated_at DESC LIMIT %s""",
                 (q, scope.tenant_id, scope.user_id, f"%{_escape_like(q)}%", scope.meeting_id, scope.meeting_id,
-                 max(1, limit)))
+                 *filter_params(), max(1, limit)))
             rows = await cur.fetchall()
             words = sorted(tokens(q))
             if not rows and len(words) > 1:
@@ -277,24 +334,32 @@ class PostgresMemoryStore:
                          AND status <> 'superseded'
                          AND (expires_at IS NULL OR expires_at > now())
                          AND search @@ q
-                         AND (%s::text IS NULL OR meeting_id IS NULL OR meeting_id = %s)
+                         AND (%s::text IS NULL OR meeting_id IS NULL OR meeting_id = %s)"""
+                    + filters + """
                        ORDER BY rank DESC, updated_at DESC LIMIT %s""",
                     (" | ".join(words[:8]), scope.tenant_id, scope.user_id, scope.meeting_id, scope.meeting_id,
-                     max(1, limit)))
+                     *filter_params(), max(1, limit)))
                 rows = await cur.fetchall()
         return [MemoryHit(_row_to_item(r), float(r.get("rank") or 0.0), "fts") for r in rows]
 
-    async def list_recent(self, scope: MemoryScope, limit: int = 20) -> list[MemoryItem]:
-        pool = await self._ensure()
-        async with pool.connection() as conn:
+    async def list_recent(self, scope: MemoryScope, limit: int = 20, *, kinds: tuple[str, ...] = (),
+                          since: datetime | None = None, until: datetime | None = None) -> list[MemoryItem]:
+        pool = list(kinds) or None
+        pool2 = list(pool) if pool is not None else None
+        db = await self._ensure()
+        async with db.connection() as conn:
             cur = await conn.execute(
                 """SELECT * FROM memory_records
                    WHERE tenant_id=%s AND user_id=%s AND deleted_at IS NULL
                      AND status <> 'superseded'
                      AND (expires_at IS NULL OR expires_at > now())
                      AND (%s::text IS NULL OR meeting_id IS NULL OR meeting_id = %s)
+                     AND (%s::text[] IS NULL OR kind = ANY(%s))
+                     AND (%s::timestamptz IS NULL OR created_at >= %s)
+                     AND (%s::timestamptz IS NULL OR created_at < %s)
                    ORDER BY updated_at DESC LIMIT %s""",
-                (scope.tenant_id, scope.user_id, scope.meeting_id, scope.meeting_id, max(1, limit)))
+                (scope.tenant_id, scope.user_id, scope.meeting_id, scope.meeting_id,
+                 pool, pool2, since, since, until, until, max(1, limit)))
             return [_row_to_item(r) for r in await cur.fetchall()]
 
     async def list_meetings(self, scope: MemoryScope) -> list[dict[str, Any]]:
@@ -317,19 +382,23 @@ class PostgresMemoryStore:
             try:
                 async with pool.connection() as conn:
                     await conn.execute(
-                        """INSERT INTO meeting_sessions (tenant_id, user_id, section_id, number, session_id, started_at)
-                           SELECT %s, %s, %s, coalesce(max(number), 0) + 1, %s, %s FROM meeting_sessions
+                        """INSERT INTO meeting_sessions
+                               (tenant_id, user_id, section_id, number, session_id, started_at, owner_pid, owner_host)
+                           SELECT %s, %s, %s, coalesce(max(number), 0) + 1, %s, %s, %s, %s FROM meeting_sessions
                            WHERE tenant_id=%s AND user_id=%s AND section_id=%s
                            ON CONFLICT (tenant_id, user_id, section_id, session_id) DO NOTHING""",
-                        (scope.tenant_id, scope.user_id, scope.meeting_id, session_id, started_at,
+                        (scope.tenant_id, scope.user_id, scope.meeting_id, session_id, started_at, os.getpid(), _HOST,
                          scope.tenant_id, scope.user_id, scope.meeting_id))
                     cur = await conn.execute(
-                        """SELECT number, session_id, started_at, ended_at FROM meeting_sessions
+                        """SELECT number, session_id, started_at, ended_at, interrupted, owner_pid, owner_host
+                           FROM meeting_sessions
                            WHERE tenant_id=%s AND user_id=%s AND section_id=%s AND session_id=%s""",
                         (scope.tenant_id, scope.user_id, scope.meeting_id, session_id))
                     row = await cur.fetchone()
                     if row:
-                        return MeetingSession(int(row["number"]), str(row["session_id"]), row["started_at"], row["ended_at"])
+                        return MeetingSession(int(row["number"]), str(row["session_id"]), row["started_at"],
+                                              row["ended_at"], bool(row.get("interrupted")),
+                                              int(row.get("owner_pid") or 0), str(row.get("owner_host") or ""))
             except Exception as e:  # noqa: BLE001 - unique violation from a race: retry
                 if "unique" not in str(e).lower():
                     raise
@@ -339,18 +408,63 @@ class PostgresMemoryStore:
         pool = await self._ensure()
         async with pool.connection() as conn:
             await conn.execute(
-                "UPDATE meeting_sessions SET ended_at=%s WHERE tenant_id=%s AND user_id=%s AND section_id=%s AND session_id=%s",
+                "UPDATE meeting_sessions SET ended_at=%s, interrupted=false "
+                "WHERE tenant_id=%s AND user_id=%s AND section_id=%s AND session_id=%s",
                 (ended_at, scope.tenant_id, scope.user_id, scope.meeting_id, session_id))
+
+    async def recover_sessions(self, scope: MemoryScope, current_session_id: str) -> list[MeetingSession]:
+        """Close meetings whose process did not end them, keeping their last activity as the end time.
+
+        Rows owned by another process that is still alive on this host are left alone; recovery must never
+        close a meeting that is still running.
+        """
+        if scope.meeting_id is None:
+            return []
+        pool = await self._ensure()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT number, session_id, started_at, ended_at, interrupted, owner_pid, owner_host
+                   FROM meeting_sessions
+                   WHERE tenant_id=%s AND user_id=%s AND section_id=%s
+                     AND ended_at IS NULL AND session_id <> %s AND deleted_at IS NULL""",
+                (scope.tenant_id, scope.user_id, scope.meeting_id, current_session_id))
+            rows = await cur.fetchall()
+            recovered: list[MeetingSession] = []
+            for r in rows:
+                pid = int(r.get("owner_pid") or 0)
+                if r.get("owner_host") == _HOST and pid not in (0, os.getpid()) and _pid_alive(pid):
+                    continue
+                cur = await conn.execute(
+                    """UPDATE meeting_sessions m
+                       SET ended_at = coalesce(
+                               (SELECT max(r.updated_at) FROM memory_records r
+                                WHERE r.tenant_id=m.tenant_id AND r.user_id=m.user_id AND r.session_id=m.session_id),
+                               m.started_at),
+                           interrupted = true
+                       WHERE m.tenant_id=%s AND m.user_id=%s AND m.section_id=%s AND m.session_id=%s
+                       RETURNING m.number, m.session_id, m.started_at, m.ended_at, m.interrupted,
+                                 m.owner_pid, m.owner_host""",
+                    (scope.tenant_id, scope.user_id, scope.meeting_id, r["session_id"]))
+                closed = await cur.fetchone()
+                if closed:
+                    recovered.append(MeetingSession(int(closed["number"]), str(closed["session_id"]),
+                                                    closed["started_at"], closed["ended_at"],
+                                                    bool(closed.get("interrupted")),
+                                                    int(closed.get("owner_pid") or 0),
+                                                    str(closed.get("owner_host") or "")))
+            return recovered
 
     async def list_sessions(self, scope: MemoryScope) -> list[MeetingSession]:
         pool = await self._ensure()
         async with pool.connection() as conn:
             cur = await conn.execute(
-                """SELECT number, session_id, started_at, ended_at FROM meeting_sessions
+                """SELECT number, session_id, started_at, ended_at, interrupted, owner_pid, owner_host
+                   FROM meeting_sessions
                    WHERE tenant_id=%s AND user_id=%s AND section_id=%s AND deleted_at IS NULL ORDER BY number""",
                 (scope.tenant_id, scope.user_id, scope.meeting_id))
-            return [MeetingSession(int(r["number"]), str(r["session_id"]), r["started_at"], r["ended_at"])
-                    for r in await cur.fetchall()]
+            return [MeetingSession(int(r["number"]), str(r["session_id"]), r["started_at"], r["ended_at"],
+                                   bool(r.get("interrupted")), int(r.get("owner_pid") or 0),
+                                   str(r.get("owner_host") or "")) for r in await cur.fetchall()]
 
     async def delete_session(self, scope: MemoryScope, session_id: str) -> int:
         """Soft delete: the meeting disappears from lists and its records stop being returned; rows stay in the table."""
@@ -404,6 +518,19 @@ class PostgresMemoryStore:
 
 def _escape_like(s: str) -> str:
     return _LIKE_SPECIAL.sub(r"\\\1", s)
+
+
+def _matches(item: MemoryItem, kinds: tuple[str, ...], since: datetime | None, until: datetime | None) -> bool:
+    """The in-memory equivalent of the SQL filters. Expiry is enforced on read, not only by cleanup."""
+    if item.status == "superseded" or is_expired(item):
+        return False
+    if kinds and item.kind not in kinds:
+        return False
+    if since is not None and item.created_at < since:
+        return False
+    if until is not None and item.created_at >= until:
+        return False
+    return True
 
 
 def _jsonb(value: dict[str, Any]) -> Any:

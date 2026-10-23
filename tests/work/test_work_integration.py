@@ -3,31 +3,30 @@ import asyncio
 import json
 from pathlib import Path
 
-from tests.helpers import ROLES, TH, cfg
-from tests.hiring.test_hiring import CV_TEXT, EXTRACTION, GOOD_PLAN, gh_http
-from tests.voice.test_voice_engine import NAMES, hush, mic, until
-
 from tara.adapters.local import LocalMeetingAdapter
-from tara.floor.classify import RuleIntentClassifier
-from tara.core.config import ToolSpec
 from tara.control.state import ControlState
-from tara.testing.fakes import FakeLLMProvider
+from tara.core.config import ToolSpec
+from tara.core.settings import RuntimeSettings, WorkSettings, validate
+from tara.floor.classify import RuleIntentClassifier
+from tara.floor.participation import Attribution
 from tara.hiring.github import GitHubReader
 from tara.memory.models import MemoryScope
 from tara.memory.service import MemoryService
 from tara.memory.store import InMemoryMemoryStore
-from tara.floor.participation import Attribution
-from tara.core.settings import RuntimeSettings, WorkSettings, validate
+from tara.testing.fakes import FakeLLMProvider
+from tara.testing.voice_fakes import FakeVoiceProvider, FakeVoiceSession
 from tara.tools.executor import ToolExecutor
 from tara.voice.app import LiveTaraApp
 from tara.voice.engine import LiveParams, LiveVoiceEngine
 from tara.voice.events import InputTranscript, ToolCallRequested, ToolRequest, TurnComplete, VoiceSessionConfig
-from tara.testing.voice_fakes import FakeVoiceProvider, FakeVoiceSession
 from tara.voice.memory import InMemoryMeetingMemory, Scope, WorkingMemory
 from tara.voice.participation import LiveParticipation
 from tara.voice.playback import PlaybackResult
 from tara.voice.registry import SessionRegistry
 from tara.work import WorkServices
+from tests.helpers import ROLES, TH, cfg
+from tests.hiring.test_hiring import CV_TEXT, EXTRACTION, GOOD_PLAN, gh_http
+from tests.voice.test_voice_engine import NAMES, hush, mic, until
 
 run = asyncio.run
 SC = Scope("t1", "m1")
@@ -300,7 +299,7 @@ async def test_auto_memory_and_nudges_run_from_real_turns(tmp_path):
         await until(lambda: mem.list(SC))
         assert mem.list(SC)[0].kind == "decision" and mem.list(SC)[0].status == "candidate" and mem.list(SC)[0].body.startswith("Recruiter:")
         sess.push(InputTranscript("I always prefer short meetings in the morning", True), TurnComplete(2))
-        await until(lambda: svc.store._items if hasattr(svc.store, "_items") else True)
+        await until(lambda: len(svc.store._items) >= 2)                 # wait for the long-term write, not just any item
         hits = await svc.recall(MemoryScope("t1", "u1"), "short meetings")
         assert hits and hits[0].item.status == "candidate" and hits[0].item.text.startswith("Recruiter said:")
         sess.push(InputTranscript("my password is hunter2 for the portal", True), TurnComplete(3))

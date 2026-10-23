@@ -18,10 +18,11 @@ from typing import Protocol
 
 from ..core.contracts import KnowledgeProvider, Passage
 from ..core.errors import PermissionDenied
+from ..memory.kinds import NOTE_KINDS
+from ..memory.kinds import PROMOTABLE_NOTE_KINDS as PROMOTABLE_KINDS
 from ..tools.executor import ToolDef
 
-NOTE_KINDS = ("decision", "action_item", "open_question", "summary")
-PROMOTABLE_KINDS = ("decision", "action_item")
+# `NOTE_KINDS` and the promotable subset are imported from `memory.kinds`: one vocabulary, translated once.
 
 
 @dataclass(frozen=True)
@@ -79,7 +80,7 @@ def _clean(text: str) -> str:
 
 @dataclass(frozen=True)
 class MemoryRecord:
-    kind: str                         # decision | action_item | open_question | summary
+    kind: str                         # decision | action_item | open_question | proposal | summary
     body: str
     source_event_ids: tuple[str, ...]  # provenance is mandatory
     status: str = "candidate"          # never "confirmed" without an explicit promotion

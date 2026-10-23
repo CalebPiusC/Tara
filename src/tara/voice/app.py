@@ -25,11 +25,14 @@ from ..floor.classify import IntentClassifier, RuleIntentClassifier
 from ..floor.participation import Thresholds, min_confidence
 from ..meetings.types import RULES, parse_type
 from ..memory import (
+    KnowledgeService,
     MeetingSession,
     MemoryScope,
     MemoryService,
     MemoryWriteGate,
+    PostgresKnowledgeStore,
     PostgresMemoryStore,
+    knowledge_tool_grants,
     meeting_slug,
     memory_tool_grants,
 )
@@ -86,6 +89,7 @@ class LiveTaraApp:
                  registry: SessionRegistry | None = None, bus: EventBus | None = None,
                  meeting_memory: MeetingMemory | None = None, thresholds: Thresholds = DEFAULT_THRESHOLDS,
                  expression_sink: ExpressionSink | None = None, memory_service: MemoryService | None = None,
+                 knowledge_service: KnowledgeService | None = None,
                  user_id: str = "local-user", orchestration: Orchestration | None = None,
                  interview_code: str = "", defer_opening: bool = False):
         errors = [f"{i.field}: {i.message}" for i in validate(settings) if i.severity == "error"]
@@ -117,8 +121,20 @@ class LiveTaraApp:
                 store, metrics=self.metrics, write_timeout_s=settings.memory.write_timeout_s,
                 recall_timeout_s=settings.memory.recall_timeout_s)
             self._owns_memory = True
+        self.knowledge_service = knowledge_service
+        self._owns_knowledge = False
+        if self.knowledge_service is None and settings.memory.enabled and settings.memory.knowledge_enabled:
+            document_store = PostgresKnowledgeStore(
+                settings.memory.database_url, schema=settings.memory.schema or None,
+                timeout_s=settings.memory.knowledge_timeout_s)
+            self.knowledge_service = KnowledgeService(
+                document_store, metrics=self.metrics, search_timeout_s=settings.memory.knowledge_timeout_s,
+                write_timeout_s=settings.memory.write_timeout_s,
+                default_limit=settings.memory.knowledge_search_limit,
+                max_context_chars=settings.memory.knowledge_context_chars)
+            self._owns_knowledge = True
         self.memory_scope = (MemoryScope(scope.tenant_id, user_id, meeting_id=meeting_slug(scope.meeting_id))
-                             if self.memory_service is not None else None)
+                             if (self.memory_service is not None or self.knowledge_service is not None) else None)
         self.memory_gate = MemoryWriteGate() if self.memory_service is not None else None
         self.session_id = session_id
         self.interview_code = interview_code
@@ -153,6 +169,15 @@ class LiveTaraApp:
             for definition, grant in memory_tools:
                 if definition.name not in existing:
                     tools.register_and_grant(definition, grant)
+        if self.knowledge_service is not None and self.memory_scope is not None:
+            tools = tools or ToolExecutor({}, ())
+            existing = {d["name"] for d in tools.describe()}
+            document_tools = knowledge_tool_grants(
+                self.knowledge_service, self.memory_scope, limit=settings.memory.knowledge_search_limit,
+                max_chars=settings.memory.knowledge_context_chars, timeout_s=settings.memory.knowledge_timeout_s)
+            for definition, grant in document_tools:
+                if definition.name not in existing:
+                    tools.register_and_grant(definition, grant)
         # Secretary, interviewing and documents (off by default). Code-owned tools; Flash writes text, our code renders files.
         self.work: WorkServices | None = None
         if settings.work.enabled:
@@ -179,7 +204,8 @@ class LiveTaraApp:
         self.provider: VoiceProvider = provider or GeminiLiveProvider(
             settings.gemini.api_key, lv.model, lv.connect_timeout_s, lv.api_version or None)
         instruction = live_system_instruction(cfg, names, roles, self.profile, pr.vocal_reactions,
-                                              memory_enabled=self.memory_service is not None)
+                                              memory_enabled=self.memory_service is not None,
+                                              knowledge_enabled=self.knowledge_service is not None)
         if self.orchestration is not None:
             instruction = f"{instruction}\n{self.orchestration.instructions()}"
         if self.work is not None:
@@ -215,6 +241,13 @@ class LiveTaraApp:
         if self.orchestration is not None and self.orchestration.tasks is not None:
             self.orchestration.tasks.on_done = self._research_finished
         self._announcements: set[asyncio.Task[None]] = set()
+        self._memory_tasks: set[asyncio.Task[int]] = set()
+
+    def _memory_task_done(self, task: asyncio.Task[int]) -> None:
+        """A background consolidation must never surface as an unhandled task exception at shutdown."""
+        self._memory_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self.metrics.inc("memory_consolidate_failures")
 
     def _research_finished(self, status: str, query: str, error: str) -> None:
         """A background research task ended: say so, so nobody has to ask "is it done?". The result itself is read out only on request."""
@@ -260,7 +293,13 @@ class LiveTaraApp:
             svc, mscope = self.memory_service, self.memory_scope
             try:
                 self.meeting = await svc.start_session(mscope, self.session_id)        # this run becomes meeting N
+                recovered = await svc.recover(mscope, self.session_id)                 # close what a dead run left open
                 await asyncio.wait_for(svc.store.purge_expired(mscope), self.settings.memory.write_timeout_s)
+                if recovered:
+                    self.metrics.inc("memory_sessions_recovered", len(recovered))
+                task = asyncio.create_task(svc.consolidate(mscope), name="memory-consolidate")
+                self._memory_tasks.add(task)
+                task.add_done_callback(self._memory_task_done)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - memory trouble must not stop the voice session
@@ -317,6 +356,8 @@ class LiveTaraApp:
     async def close(self) -> None:
         for t in list(getattr(self, "_announcements", ())):
             t.cancel()
+        for t in list(getattr(self, "_memory_tasks", ())):
+            t.cancel()
         if self._catch_up is not None and not self._catch_up.done():
             self._catch_up.cancel()
         if self._opening is not None and not self._opening.done():
@@ -340,13 +381,21 @@ class LiveTaraApp:
                         raise
                     except Exception:  # noqa: BLE001 - shutdown must finish; the failure is counted, never hidden
                         self.metrics.inc("memory_close_failures")
+                if self._owns_knowledge and self.knowledge_service is not None:
+                    try:
+                        await asyncio.wait_for(self.knowledge_service.close(), self.settings.memory.knowledge_timeout_s)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001 - shutdown must finish; the failure is counted, never hidden
+                        self.metrics.inc("knowledge_close_failures")
 
     def health(self) -> dict[str, Any]:
         e = self.engine
         out = {"status": e.status, "epoch": e.epoch, "takeover": e.takeover_active, "muted": e.muted,
                "playing": self.playback.is_playing, "model": self.settings.live.model, "profile": self.profile.value,
                "key": "set" if self.settings.gemini.api_key else "missing",
-               "memory": "enabled" if self.memory_service is not None else "disabled"}
+               "memory": "enabled" if self.memory_service is not None else "disabled",
+               "knowledge": "enabled" if self.knowledge_service is not None else "disabled"}
         if self.orchestration is not None:
             out["orchestration"] = self.orchestration.health()
         if self.work is not None:

@@ -22,6 +22,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "demo": ("tara.voice.demo", "Local microphone/speaker conversation"),
     "smoke": ("tara.voice.smoke", "One real Gemini Live turn (needs a key; opt-in)"),
     "migrate": ("tara.memory.migrate", "Create or update the PostgreSQL memory tables"),
+    "knowledge": ("tara.memory.knowledge_cli", "Ingest, list, search, share or delete approved documents"),
 }
 
 

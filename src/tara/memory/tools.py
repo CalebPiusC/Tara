@@ -13,7 +13,9 @@ from ..core.config import ToolSpec
 from ..core.errors import PermissionDenied, ToolError
 from ..tools.executor import ToolDef
 from .intent import MemoryWriteGate
+from .kinds import normalize_kind
 from .models import MAX_MEMORY_CHARS, MeetingSession, MemoryItem, MemoryScope
+from .retrieval import claim_label, parse_query
 from .service import MemoryService, span, when
 
 
@@ -22,7 +24,8 @@ def remember_memory_tool(service: MemoryService, scope: MemoryScope, gate: Memor
     async def handler(text: str, kind: str = "fact") -> dict[str, str]:
         if not gate.remember_allowed():
             raise PermissionDenied("remember_memory requires an explicit request from the participant")
-        item = await service.remember(scope, text.strip()[:MAX_MEMORY_CHARS], source=source, kind=kind, session_id=session_id)
+        item = await service.remember(scope, text.strip()[:MAX_MEMORY_CHARS], source=source,
+                                      kind=normalize_kind(kind), session_id=session_id)
         return {"status": "saved", "id": item.id, "kind": item.kind,
                 "say": "Tell the participant in one short sentence that it is saved and that you can bring it up "
                        "whenever they ask, including in a later meeting. Do not stay silent."}
@@ -46,36 +49,56 @@ def recall_memory_tool(service: MemoryService, scope: MemoryScope, *, timeout_s:
 
     def row(item: MemoryItem, known: dict[str, MeetingSession]) -> dict[str, str]:
         out = {"id": item.id, "text": item.text, "kind": item.kind, "source": item.source,
-               "status": item.status, "updated_at": item.updated_at.isoformat()}
+               "status": item.status, "updated_at": item.updated_at.isoformat(), "label": claim_label(item)}
+        if item.metadata.get("possible_conflict"):
+            out["warning"] = "another memory may say something different; report both honestly"
         m = known.get(item.session_id)
         if m is not None:
             out["meeting"] = str(m.number)
             out["when"] = when(m.started_at)
         return out
 
-    async def handler(query: str = "", limit: int = 5) -> dict[str, object]:
+    async def handler(query: str = "", limit: int = 5, period: str = "") -> dict[str, object]:
         n = max(1, min(limit, 10))
         known = await sessions_by_id()
-        hits = await service.recall(scope, query, limit=n) if query.strip() else []
+        window = parse_query(period) if period.strip() else None
+        hits = (await service.recall(scope, query, limit=n,
+                                     since=window.since if window else None,
+                                     until=window.until if window else None)
+                if (query.strip() or period.strip()) else [])
         if hits:
-            return {"count": len(hits), "match": "search", "memories": [row(h.item, known) for h in hits]}
+            searched = any(h.reason and "recent" not in h.reason for h in hits)
+            out: dict[str, object] = {"count": len(hits), "match": "search" if searched else "recent",
+                                      "memories": [row(h.item, known) for h in hits]}
+            if not searched:
+                out["note"] = ("These are the newest memories in that period, not an exact keyword match; say so "
+                               "honestly rather than implying they answer the question directly.")
+            if window is not None and window.period_label:
+                out["period"] = window.period_label
+            return out
         # Broad questions ("anything we did last week?") share no words with a stored memory, so list the newest.
-        recent = await service.store.list_recent(scope, n)
+        recent = await service.store.list_recent(scope, n, since=window.since if window else None,
+                                                until=window.until if window else None)
         if recent:
-            return {"count": len(recent), "match": "recent",
-                    "note": "No exact match. These are the newest stored memories; say honestly whether they answer "
-                            "the question, and do not claim dates you cannot see in updated_at.",
-                    "memories": [row(i, known) for i in recent]}
-        return {"count": 0, "memories": [],
-                "note": "Nothing is stored in long-term memory. Tell the participant plainly that you do not "
-                        "remember anything yet."}
+            out = {"count": len(recent), "match": "recent",
+                   "note": "No exact match. These are the newest stored memories; say honestly whether they answer "
+                           "the question, and do not claim dates you cannot see in updated_at.",
+                   "memories": [row(i, known) for i in recent]}
+            if window is not None and window.period_label:
+                out["period"] = window.period_label
+            return out
+        note = ("No memory matches that period. Say so plainly; do not guess." if window is not None
+                else "Nothing is stored in long-term memory. Tell the participant plainly that you do not "
+                     "remember anything yet.")
+        return {"count": 0, "memories": [], "note": note}
 
     return ToolDef(
-        "recall_memory", {"query": str}, handler, optional={"limit": int},
-        description="Search long-term memory from earlier conversations. Use this whenever the participant asks "
-                    "what you remember or refers to something discussed before. Say a short thoughtful \"Hmm, let me check\" first. "
-                    "Always answer after the result: if count is 0, say you do not remember anything; never stay silent "
-                    "and never invent it.",
+        "recall_memory", {"query": str}, handler, optional={"limit": int, "period": str},
+        description="Search long-term memory from earlier meetings. Use this whenever the participant asks "
+                    "what you remember, refers to something discussed before, or asks about a time such as "
+                    "'last week' or 'yesterday' (pass period only when they named one). Say a short thoughtful "
+                    "\"Hmm, let me check\" first. Always answer after the result: if count is 0, say you do not "
+                    "remember; never stay silent and never invent it.",
         timeout_s=timeout_s, permission="memory_read", side_effect=False)
 
 

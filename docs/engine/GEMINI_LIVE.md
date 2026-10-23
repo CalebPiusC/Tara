@@ -58,7 +58,7 @@ flowchart LR
   end
   CLOUD["Gemini Live API (cloud)"]
   MM["MeetingMemory (in-memory stand-in)"]
-  KN["KnowledgeProvider via search_knowledge tool (scope bound by app)"]
+  KN["KnowledgeService / PostgresKnowledgeStore via search_knowledge (scope bound by app)"]
   ADP -->|"PCM chunks"| UP
   ADP --> VAD
   UP -->|"16 kHz PCM16"| GL
@@ -86,7 +86,7 @@ Before: STT, router, local LLM or Gemini text, TTS (cascaded, `legacy/engine.py`
 | Tool authorization and execution | Our `ToolExecutor` |
 | Meeting transport | `MeetingAdapter` (separate; no real one yet) |
 | Speaker identity | Our attribution from per-participant streams; unknown on mixed audio |
-| Memory and retrieval | `voice/memory.py` for live/working/session memory; `memory/` for explicit PostgreSQL long-term memory; no document RAG, embeddings or vector search |
+| Memory and retrieval | `voice/memory.py` for live/working/session memory; `memory/` for explicit PostgreSQL long-term memory and approved-document RAG (ingestion, chunks, versions, read ACLs, deletion); no embeddings or vector search |
 | Whisper, Qwen, Kokoro | Optional dormant adapters; **not downloaded, not started** |
 
 ## Conversational behaviour
@@ -120,13 +120,13 @@ sequenceDiagram
 Live will answer anything it hears, so delivery is gated: response audio is **held** (bounded by `hold_ms` and chunk count) until the input transcript lets `LiveParticipation` decide. Allow when addressed or invited (or proactive policy outside interviews, or Tara-initiated via `prompt()`); deny when silent policy, muted, takeover active, not addressed, or (interviews) speaker identity unreliable; takeover phrases need a trusted role and reliable identity; "be quiet" mutes. Soft denials (not addressed so far) can flip while transcript fragments arrive; timeout fails silent. Cost: added latency up to the verdict, and it depends on input transcription arriving; **ordering between transcript and audio is unverified**. Alternative for later: disable automatic VAD and send activity signals only for addressed speech (docs support manual activity signals).
 
 ## Memory interfaces (foundation only)
-Live state (`ConversationState`, per session), working memory (`WorkingMemory`, bounded, used to re-seed a fresh session after reconnect), meeting memory (`MeetingMemory` Protocol, in-memory stand-in with mandatory provenance and `Scope(tenant, meeting)` isolation), explicit long-term memory (`src/tara/memory/`, PostgreSQL when `TARA_MEMORY_ENABLED=1`; tools `remember_memory`, `recall_memory`, `forget_memory` plus one bounded startup block), and the older `KnowledgeProvider` stand-in (exposed only as a `search_knowledge` tool whose scope is bound by the app). There is no document ingestion, vector store, embedding model or Redis. Sessions share no live state; long-term memory is shared only within the same tenant/user. The in-memory retrieval stand-in has no authorization and must not hold multi-tenant data.
+Live state (`ConversationState`, per session), working memory (`WorkingMemory`, bounded, used to re-seed a fresh session after reconnect), meeting memory (`MeetingMemory` Protocol, in-memory stand-in with mandatory provenance and `Scope(tenant, meeting)` isolation), explicit long-term memory (`src/tara/memory/`, PostgreSQL when `TARA_MEMORY_ENABLED=1`; tools `remember_memory`, `recall_memory`, `forget_memory` plus one bounded startup block), and approved-document RAG (`KnowledgeService` / `PostgresKnowledgeStore`, enabled by `TARA_KNOWLEDGE_ENABLED=1`; `search_knowledge` with a code-bound scope, approved-only, owner/read-ACL and section filtering, versions, deletion and the `tara knowledge` CLI). There is no vector store, embedding model, PDF/Word parser, crawler or Redis. Sessions share no live state; long-term memory and documents are shared only within the same tenant/user or an explicit read grant. The older `KnowledgeProvider` stand-in remains for legacy tests; it has no ingestion or ACL path and must not hold multi-tenant data.
 
 ## Tools
 Granted and registered tools are declared to the model. Calls are validated (unknown, missing or mistyped arguments refused, so a model cannot pass a scope), run as separate tasks (never on the audio paths), bounded by timeout and a concurrency limit, and answered with structured results or errors. Side-effecting tools are refused during a live turn and recorded in `approvals_needed`. Cancellation events cancel in-flight tools and no result is sent. Results from a dead session are dropped. Not verified against the service.
 
 ## Configuration (environment; see `.env.example`)
-`GEMINI_API_KEY` (secret, never logged), `TARA_LIVE_ENABLED`, `TARA_LIVE_MODEL` (required, no default on purpose), `TARA_LIVE_VOICE`, timeouts, reconnect attempts and backoff, `TARA_LIVE_MAX_SESSIONS`, `TARA_LIVE_HOLD_MS`, queue sizes, `TARA_LIVE_LOCAL_BARGE_IN`, transcription flags, resumption, `TARA_LIVE_COMPRESSION` (on by default; without it audio sessions end at about 15 minutes), `TARA_LIVE_SILENCE_MS`, `TARA_LIVE_PROACTIVE_AUDIO`, `TARA_LIVE_HYBRID_EOS`, `TARA_LIVE_API_VERSION`. Validation refuses a start without key or model; errors never contain the key (redaction is applied to every provider error).
+`GEMINI_API_KEY` (secret, never logged), `TARA_LIVE_ENABLED`, `TARA_LIVE_MODEL` (required, no default on purpose), `TARA_LIVE_VOICE`, timeouts, reconnect attempts and backoff, `TARA_LIVE_MAX_SESSIONS`, `TARA_LIVE_HOLD_MS`, queue sizes, `TARA_LIVE_LOCAL_BARGE_IN`, transcription flags, resumption, `TARA_LIVE_COMPRESSION` (on by default; without it audio sessions end at about 15 minutes), `TARA_LIVE_SILENCE_MS`, `TARA_LIVE_PROACTIVE_AUDIO`, `TARA_LIVE_HYBRID_EOS`, `TARA_LIVE_API_VERSION`. Memory and document retrieval add `TARA_MEMORY_*` and `TARA_KNOWLEDGE_ENABLED`, `TARA_KNOWLEDGE_SEARCH_LIMIT`, `TARA_KNOWLEDGE_CONTEXT_CHARS`, `TARA_KNOWLEDGE_TIMEOUT_S`; the document tool requires memory enabled and the same PostgreSQL database. Validation refuses a start without key or model; errors never contain the key (redaction is applied to every provider error).
 
 ## Security
 Server-mediated connection: the permanent key stays on the server and is never placed in a client bundle. If a browser or phone ever connects directly, use ephemeral tokens (SDK `auth_tokens.create`, Live-only, `v1beta`); not implemented because no direct client exists. Do not run real interviews on the free tier (the pricing page says free-tier data may be used to improve Google products). Transcripts and audio go to Google: disclosure and consent rules in [SECURITY_AND_PRIVACY](../architecture/SECURITY_AND_PRIVACY.md) still apply.
@@ -171,7 +171,7 @@ It uses the default input and output devices, keeps the normal gate, replies in 
 | Participation gate | Implemented (minimum rules), tested |
 | Tool calling | Implemented, tested with fakes; unverified live |
 | Reconnect, GoAway, resumption | Implemented, tested with fakes; unverified live |
-| Memory interfaces | Live/working/session memory plus explicit PostgreSQL long-term memory; no document RAG |
+| Memory interfaces | Live/working/session memory plus explicit PostgreSQL long-term memory and approved-document RAG; no embeddings or vector search |
 | Metrics | Implemented; one real smoke sample (connect and text-to-first-audio); no speech-to-speech, playback or interruption measurements |
 | Local audio-device demo | Implemented (`AudioDeviceAdapter`, `python -m tara.voice.demo`); fake-backend tested; owner ran a headphone conversation (microphone, gate, model audio, playback); speaker mode and reconnect need a real-device check |
 | Google Meet | **Not implemented** (the local demo is not Meet) |

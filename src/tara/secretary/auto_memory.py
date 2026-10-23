@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 
 from ..core.metrics import Metrics
+from ..memory.kinds import to_record_kind
 from ..memory.models import MemoryScope, utcnow
 from ..memory.service import MemoryService
 from ..voice.memory import NOTE_KINDS, MeetingMemory, MemoryRecord, Scope
@@ -57,7 +58,7 @@ class AutoMemory:
             if d.reason == "sensitive":
                 self.metrics.inc("auto_memory_skipped_sensitive")
             elif d.tier is Tier.SESSION and self.enabled_session and self.meeting_memory is not None:
-                self._save_session(turn, d)
+                await self._save_session(turn, d)
             elif d.tier is Tier.LONG_TERM and self.service is not None and self.memory_scope is not None:
                 await self._save_long_term(turn, d)
             else:
@@ -66,16 +67,30 @@ class AutoMemory:
             self.metrics.inc("auto_memory_failures")
         return d
 
-    def _save_session(self, turn: TurnRecord, d: TierDecision) -> None:
+    async def _save_session(self, turn: TurnRecord, d: TierDecision) -> None:
+        """A live note AND a durable candidate: the live copy keeps the meeting smooth, the durable copy survives exit."""
         if d.kind not in NOTE_KINDS:
             return
         text = turn.text.strip()[: self.cfg.max_text_chars]
         who = turn.speaker_name if turn.speaker_name and turn.reliable else ""
         body = f"{who}: {text}" if who else text
+        source = f"{self.session_id}:auto:{turn.turn_id}:{next(self._seq)}"
         self.meeting_memory.add(  # type: ignore[union-attr]
-            self.scope, MemoryRecord(d.kind, body, (f"{self.session_id}:auto:{turn.turn_id}:{next(self._seq)}",),
-                                     owner=who if d.kind == "action_item" else ""))
+            self.scope, MemoryRecord(d.kind, body, (source,), owner=who if d.kind == "action_item" else ""))
         self.metrics.inc("auto_memory_session_saved")
+        if self.service is None or self.memory_scope is None:
+            return
+        metadata = {"auto": True, "note_kind": d.kind, "speaker": who or "unknown", "reason": d.reason,
+                    **({"type": "action", "state": "open", "owner": who} if d.kind == "action_item" else {})}
+        if d.kind == "proposal":
+            metadata.update({"claim": "proposal", "tentative": True})   # repetition never makes it agreement
+        try:
+            await self.service.remember(
+                self.memory_scope, body, source=f"auto:{source}", kind=to_record_kind(d.kind),
+                session_id=self.session_id, confidence=0.7, status="candidate", metadata=metadata)
+            self.metrics.inc("auto_memory_session_persisted")
+        except Exception:  # noqa: BLE001 - the live note is already taken; a failed save must not escape
+            self.metrics.inc("auto_memory_session_persist_failures")
 
     async def _save_long_term(self, turn: TurnRecord, d: TierDecision) -> None:
         assert self.service is not None and self.memory_scope is not None

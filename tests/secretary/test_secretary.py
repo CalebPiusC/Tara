@@ -11,6 +11,7 @@ from tara.memory.store import InMemoryMemoryStore
 from tara.secretary.auto_memory import AutoMemory, AutoMemoryConfig
 from tara.secretary.minutes import collect_minutes, minutes_facts
 from tara.secretary.recall import RecallNudger, meeting_recap_tool, recall_meeting_tool, search_meeting
+from tara.secretary.recorder import MeetingRecorder
 from tara.secretary.tiering import Tier, classify_turn, contains_sensitive
 from tara.voice.memory import InMemoryMeetingMemory, MemoryRecord, Scope, WorkingMemory
 from tara.voice.turns import TurnRecord
@@ -102,6 +103,20 @@ def test_seeing_it_again_promotes_it_to_permanent_and_removes_the_expiry():
         run(auto3.observe(turn("I always prefer short meetings in the morning", tid=f"t{i}")))
     again = run(svc3.recall(MS, "short meetings"))[0].item
     assert again.status == "candidate" and again.expires_at is not None and again.metadata["sightings"] == 2
+
+
+def test_a_repeated_proposal_is_still_not_an_agreed_fact():
+    store = InMemoryMemoryStore()
+    svc = MemoryService(store)
+    scope = MemoryScope("t1", "u1", meeting_id="sec")
+    proposal = run(svc.remember(scope, "We should probably use PostgreSQL.", source="s:1", kind="note",
+                                session_id="m1", status="candidate",
+                                metadata={"tentative": True, "note_kind": "proposal"}))
+    recorder = MeetingRecorder(svc, scope, session_id="m2", working=WorkingMemory())
+    assert run(recorder._reinforce([proposal], proposal.text, "m2"))     # it was seen again
+    after = run(store.get(scope, proposal.id))
+    assert after is not None and after.status == "candidate" and after.metadata["sightings"] == 2
+    assert after.expires_at is None or after.expires_at > utcnow()
 
 
 def test_personal_facts_from_an_unknown_speaker_are_skipped_but_team_facts_are_kept():

@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-MEMORY_KINDS = ("fact", "preference", "project", "decision", "correction", "note", "episode", "summary", "action")
+from .kinds import RECORD_KINDS, normalize_kind
+
+MEMORY_KINDS = RECORD_KINDS
 MEMORY_STATUSES = ("confirmed", "candidate", "superseded")
 MAX_MEMORY_CHARS = 4000
 MEETING_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -40,7 +42,8 @@ def normalize_text(text: str) -> str:
 
 
 def tokens(text: str) -> set[str]:
-    return {w for w in _WORD.findall(text.lower()) if w not in _STOP and len(w) > 1}
+    """Content words for matching. Numbers are kept even when short: 'meeting 1' and 'meeting 2' are not the same."""
+    return {w for w in _WORD.findall(text.lower()) if w not in _STOP and (len(w) > 1 or w.isdigit())}
 
 
 def new_id() -> str:
@@ -84,8 +87,9 @@ class MemoryItem:
     def __post_init__(self) -> None:
         if not self.id:
             raise ValueError("memory id is required")
-        if self.kind not in MEMORY_KINDS:
-            raise ValueError(f"unknown memory kind {self.kind!r}; choose from {list(MEMORY_KINDS)}")
+        canonical = normalize_kind(self.kind)          # accepts "action_item" from older rows and model output
+        if canonical != self.kind:
+            object.__setattr__(self, "kind", canonical)
         if self.status not in MEMORY_STATUSES:
             raise ValueError(f"unknown memory status {self.status!r}")
         body = self.text.strip()
@@ -120,12 +124,19 @@ class MemoryItem:
 
 @dataclass(frozen=True)
 class MeetingSession:
-    """One numbered meeting inside a section (chat). `session_id` links it to the records written during it."""
+    """One numbered meeting inside a section (chat). `session_id` links it to the records written during it.
+
+    `ended_at is None` means the meeting is unfinished (it may still be running). `interrupted` marks a meeting
+    that was closed because its process did not end it, so recovery never pretends it completed normally.
+    """
 
     number: int
     session_id: str
     started_at: datetime
     ended_at: datetime | None = None
+    interrupted: bool = False
+    owner_pid: int = 0
+    owner_host: str = ""
 
 
 @dataclass(frozen=True)

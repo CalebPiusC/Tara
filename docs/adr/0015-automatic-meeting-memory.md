@@ -1,6 +1,6 @@
 # ADR-0015: Automatic, meeting-scoped memory
 
-**Status:** Accepted (2026-10-21). Implemented and tested offline and against real PostgreSQL in a temporary schema; the spoken behaviour is not yet verified.
+**Status:** Accepted (2026-10-21). Implemented and tested offline and against real PostgreSQL in a temporary schema; the spoken behaviour is not yet verified. Retrieval, consolidation, corrections and recovery were extended by [ADR-0016](0016-memory-retrieval-consolidation-recovery.md).
 **Context:** Memory v1 saved only what a participant explicitly asked to remember, which failed in real use: people do not say "remember this", and saves were refused when the transcript lagged. Mainstream assistants keep memory without being asked: ChatGPT keeps explicit saved memories plus automatic reference to past chats, and reports describe Claude keeping separate memory per project. Sources are in `docs/research/SOURCES.md`. The owner runs everything on one laptop with local PostgreSQL, so storage is cheap, and wants meetings not to leak into each other.
 
 **Decision:**

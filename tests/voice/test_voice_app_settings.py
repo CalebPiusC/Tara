@@ -4,9 +4,10 @@ import json
 import pytest
 
 from tara.adapters.local import LocalMeetingAdapter
+from tara.core.contracts import ToolCall
 from tara.core.errors import ConfigError
 from tara.core.settings import RuntimeSettings, validate
-from tara.memory import InMemoryMemoryStore, MemoryService
+from tara.memory import InMemoryKnowledgeStore, InMemoryMemoryStore, KnowledgeService, MemoryService
 from tara.testing.voice_fakes import FakeVoiceProvider, FakeVoiceSession
 from tara.voice.app import LiveTaraApp
 from tara.voice.events import InputTranscript, ResponseAudio, TurnComplete
@@ -110,9 +111,53 @@ def test_memory_is_off_by_default_and_adds_no_tools():
         await app.start()
         try:
             assert app.health()["memory"] == "disabled"
+            assert app.health()["knowledge"] == "disabled"
             names = [t.name for t in app.provider.opened[0][0].tools]
             assert "record_note" in names
-            assert not {"remember_memory", "recall_memory", "forget_memory"} & set(names)
+            assert not {"remember_memory", "recall_memory", "forget_memory", "search_knowledge"} & set(names)
+        finally:
+            await app.close()
+    run(go())
+
+
+def test_knowledge_settings_validate_and_never_leak_the_database_url():
+    assert errs({**LIVE, "TARA_KNOWLEDGE_ENABLED": "1"}) >= {"TARA_KNOWLEDGE_ENABLED"}
+    assert errs({**LIVE, "TARA_MEMORY_ENABLED": "1", "TARA_MEMORY_DATABASE_URL": "postgresql://localhost/tara",
+                 "TARA_KNOWLEDGE_ENABLED": "1", "TARA_KNOWLEDGE_SEARCH_LIMIT": "0"}) >= {
+        "TARA_KNOWLEDGE_SEARCH_LIMIT"}
+    assert errs({**LIVE, "TARA_MEMORY_ENABLED": "1", "TARA_MEMORY_DATABASE_URL": "postgresql://localhost/tara",
+                 "TARA_KNOWLEDGE_ENABLED": "1", "TARA_KNOWLEDGE_CONTEXT_CHARS": "10"}) >= {
+        "TARA_KNOWLEDGE_CONTEXT_CHARS"}
+    s = RuntimeSettings.from_env({**LIVE, "TARA_MEMORY_ENABLED": "1",
+                                  "TARA_MEMORY_DATABASE_URL": "postgresql://user:TOP-SECRET@localhost/tara",
+                                  "TARA_KNOWLEDGE_ENABLED": "1"})
+    assert s.memory.knowledge_enabled
+    assert "TOP-SECRET" not in repr(s) and "TOP-SECRET" not in json.dumps(s.redacted())
+    assert s.redacted()["memory"]["knowledge_enabled"] is True
+    assert errs({**LIVE, "TARA_MEMORY_ENABLED": "1",
+                 "TARA_MEMORY_DATABASE_URL": "postgresql://localhost/tara",
+                 "TARA_KNOWLEDGE_ENABLED": "1"}) == set()
+
+
+def test_app_wires_the_scoped_document_tool_and_instruction():
+    async def go():
+        knowledge = KnowledgeService(InMemoryKnowledgeStore())
+        app, _, _ = make(knowledge_service=knowledge)
+        document = await knowledge.ingest_text(app.memory_scope, "Refund Policy",
+                                               "Refunds take 30 days.", source="refund.md")
+        await app.start()
+        try:
+            cfg_sent = app.provider.opened[0][0]
+            names = [t.name for t in cfg_sent.tools]
+            assert "search_knowledge" in names
+            assert "Approved company documents" in cfg_sent.system_instruction
+            assert "untrusted data" in cfg_sent.system_instruction
+            assert app.health()["knowledge"] == "enabled"
+
+            result = await app.engine.tools.execute(ToolCall("search_knowledge", {"query": "refund window"}), "c1")
+            assert result.ok and result.output["count"] == 1
+            assert result.output["passages"][0]["document_id"] == document.id
+            assert result.output["passages"][0]["title"] == "Refund Policy"
         finally:
             await app.close()
     run(go())
