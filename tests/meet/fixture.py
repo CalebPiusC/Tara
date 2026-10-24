@@ -24,9 +24,11 @@ HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Fake Meet</ti
   <button id="leave" aria-label="Leave call">Leave</button>
   <button id="people" aria-label="People">People</button>
   <ul id="plist" role="list" aria-label="Participants" style="display:none"></ul>
+  <div id="tiles"></div>
+  <div data-participant-id="self" data-self-name="Tara"><span class="notranslate">Tara</span></div>
 </div>
 <script>
-const F = window.__fake = { cfg: { admit: false, audio: 'rtc' }, names: [], peopleOpen: false, micRms: 0, tone: null, remoteRms: 0, joined: false };
+const F = window.__fake = { cfg: { admit: false, audio: 'rtc' }, names: [], peopleOpen: false, micRms: 0, tone: null, remoteRms: 0, joined: false, speakers: {} };
 const $ = (id) => document.getElementById(id);
 const show = (id) => { for (const x of ["prejoin","waiting","denied","ended","call"]) $(x).style.display = (x === id ? "block" : "none"); };
 function renderPeople() { const ul = $("plist"); ul.style.display = F.peopleOpen ? "block" : "none";
@@ -34,6 +36,25 @@ function renderPeople() { const ul = $("plist"); ul.style.display = F.peopleOpen
 $("people").onclick = () => { F.peopleOpen = true; renderPeople(); };
 F.addParticipant = (n) => { if (!F.names.includes(n)) F.names.push(n); renderPeople(); };
 F.removeParticipant = (n) => { F.names = F.names.filter(x => x !== n); renderPeople(); };
+// A participant as Meet renders one: their own media element carrying their own live MediaStream, plus a tile that glows while
+// they speak. This is what per-participant capture taps and what the glow scanner reads; the name is never in the audio.
+F.addSpeaker = (n) => {
+  F.addParticipant(n);
+  if (F.speakers[n]) return true;
+  const oc = new AudioContext(); const osc = oc.createOscillator(); osc.frequency.value = 500 + 40 * Object.keys(F.speakers).length;
+  const g = oc.createGain(); g.gain.value = 0; osc.connect(g); osc.start();
+  const dst = oc.createMediaStreamDestination(); g.connect(dst);
+  const el = new Audio(); el.srcObject = dst.stream; el.play().catch(() => {});
+  const tile = document.createElement("div");
+  tile.setAttribute("data-participant-id", "p-" + n.replace(/[^a-z0-9]+/gi, "-").toLowerCase());
+  const span = document.createElement("span"); span.className = "notranslate"; span.textContent = n; tile.appendChild(span);
+  tile.appendChild(el);                       // like Meet: the participant's media element lives inside their tile, in the DOM
+  $("tiles").appendChild(tile);
+  F.speakers[n] = { gain: g, el, tile, oc, dst };
+  return true;
+};
+F.setSpeaker = (n, on) => { const s = F.speakers[n]; if (!s) return false; s.gain.gain.value = on ? 0.5 : 0; return true; };
+F.setGlow = (n, on) => { const s = F.speakers[n]; if (!s) return false; s.tile.classList.toggle("speaking", !!on); return true; };
 F.admit = () => { show("call"); renderPeople(); };
 F.deny = () => show("denied");
 F.dropCall = () => { $("call").style.display = "none"; };
@@ -74,7 +95,7 @@ async function startMedia() {
     await rin.setLocalDescription(await rin.createAnswer()); await rsend.setRemoteDescription(rin.localDescription);
   }
   // A self-view like Meet's: a muted preview of the bot's own microphone. It must never be tapped (that would be an echo of Tara).
-  const self = document.createElement('video'); self.muted = true; self.srcObject = mic; self.play().catch(() => {});
+  const self = document.createElement('video'); self.muted = true; self.srcObject = mic; self.play().catch(() => {}); F.selfView = self;
   // A page that monitors the microphone through its own audio context (a level meter wired to the destination at zero gain is common).
   const mctx = new AudioContext(); const msrc = mctx.createMediaStreamSource(mic); const mg = mctx.createGain(); mg.gain.value = 1; msrc.connect(mg); mg.connect(mctx.destination);
   F.joined = true;

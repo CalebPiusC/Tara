@@ -1,9 +1,14 @@
 """MeetAdapter: the MeetingAdapter the Live voice engine already understands, backed by a Google Meet browser worker.
 
 Meeting audio comes out of the page through the bridge and becomes ordinary `AUDIO` events; Tara's speech goes back in as the
-microphone. Who is speaking: Meet gives one mixed stream, so for an interview with exactly ONE other person in the room the audio is
-labelled with the candidate's stream id; with two or more people it is labelled `mix`, which the engine treats as an unknown speaker
-(so identity-gated rules, such as answering only the candidate, stay quiet rather than guess). Nothing is recorded or kept.
+microphone. Who is speaking: by default Meet gives one mixed stream, so for an interview with exactly ONE other person in the room
+the audio is labelled with the candidate's stream id; with two or more people it is labelled `mix`, which the engine treats as an
+unknown speaker (so identity-gated rules, such as answering only the candidate, stay quiet rather than guess).
+
+With `per_participant=True` the bridge taps each remote participant's own media element instead, and `tara.meet.binding` correlates
+each channel's energy against Meet's speaking glow. A channel whose name is earned carries that participant's id; a channel that is
+not earned stays `ch-<n>`, which the engine treats as unknown. Overlap therefore becomes two labelled streams rather than one
+anonymous `mix`, and a wrong name is never attached. Nothing is recorded or kept.
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ from ..core.contracts import AdapterCapabilities, DeliveryReceipt, MeetingEvent,
 from ..core.errors import JoinError
 from ..core.metrics import Metrics
 from ..floor.audio import AdaptiveGain
+from .binding import ChannelBinder
 from .bridge import IN_RATE, AudioBridge
 from .controller import InterviewSession, MeetController
 from .recorder import MeetingRecorder
@@ -42,14 +48,21 @@ class MeetAdapter:
                  on_first_participant: Callable[[], Awaitable[None]] | None = None, diag_s: float = 20.0,
                  warn_after_s: float = 30.0, log: Callable[[str], None] | None = None, audio: Any | None = None,
                  cables: dict[str, str] | None = None, half_duplex: bool = False, tail_s: float = 1.2,
-                 on_people: Callable[[int], None] | None = None, picture: str = "", recorder: MeetingRecorder | None = None, gain: AdaptiveGain | None = None):
-        self.capabilities = AdapterCapabilities(per_participant_audio=False, participant_events=True, send_audio=True,
+                 on_people: Callable[[int], None] | None = None, picture: str = "", recorder: MeetingRecorder | None = None,
+                 gain: AdaptiveGain | None = None, per_participant: bool = False, binder: ChannelBinder | None = None,
+                 self_name: str = ""):
+        self.per_participant = per_participant and audio is None       # per-channel taps only exist on the in-page route
+        self.capabilities = AdapterCapabilities(per_participant_audio=self.per_participant, participant_events=True, send_audio=True,
                                                 delivery_confirmation=True, can_mute_self=False, can_camera=False,
                                                 can_show_image=False, can_mute_others=False)
         self.controller, self.launcher_factory = controller, launcher_factory
         self.session_id, self.interview_code, self.candidate_stream_id = session_id, interview_code, candidate_stream_id
         self.url = url                                  # the engine calls join() with no target; this is the meeting
         self.worker_cfg = worker_cfg or WorkerConfig()
+        self.binder = binder if binder is not None else ChannelBinder(self_name=self_name or self.worker_cfg.bot_name or None)
+        self.channel_frames = 0                        # per-participant frames the page delivered
+        self.channels_active = False                   # true once a channel frame arrived (the mixed tap hands over)
+        self._bound: dict[int, str] = {}               # channel -> the name the binder earned for it
         self.on_status, self.metrics = on_status or (lambda _m: None), metrics or Metrics()
         self.on_first_participant = on_first_participant
         self.diag_s = diag_s                          # how often to say what the audio route is doing (0 = never)
@@ -68,7 +81,11 @@ class MeetAdapter:
         self._forward: asyncio.Task[None] | None = None
         self._peak = 0.0
         self.log = log or (lambda _m: None)           # detail that goes to the run log file, not the screen
-        self.bridge = AudioBridge(self._on_remote_audio, "devices" if audio is not None else "page", cables, picture)
+        self.bridge = AudioBridge(self._on_remote_audio, "devices" if audio is not None else "page", cables, picture,
+                                  on_channel=self._on_channel_audio if self.per_participant else None,
+                                  on_glow=self._on_glow if self.per_participant else None,
+                                  on_self=self._on_self_name if self.per_participant else None,
+                                  channels=self.per_participant)
         self.worker: MeetWorker | None = None
         self.session: InterviewSession | None = None
         self._queue: asyncio.Queue[MeetingEvent | None] = asyncio.Queue(maxsize=queue_chunks)
@@ -168,6 +185,16 @@ class MeetAdapter:
             self.on_status(f"audio check: meeting audio tracks={st.get('remoteTracks', 0)}, frames received={self.bridge.frames_in}, "
                            f"level={float(st.get('inRms', 0)):.3f}, microphone opened by Meet={st.get('gumCalls', 0)}x, "
                            f"people seen={len(self._people)}")
+            if self.per_participant:
+                try:
+                    bd = await AudioBridge.bind(page)
+                except Exception:  # noqa: BLE001 - diagnostics must never break the audio path
+                    bd = {}
+                self.on_status(f"per-participant channels: {int(bd.get('channels', 0))} connected, "
+                               f"{int(bd.get('frames', 0))} frames, lit now: {', '.join(bd.get('lit') or []) or 'nobody'}")
+                if waited >= self.warn_after_s and int(bd.get("channels", 0)) == 0:
+                    self.on_status("WARNING: per-participant audio found no participant audio elements, so only the mixed tap is "
+                                   "carrying the meeting. Run again without --per-participant if this repeats.")
             d_packets = int(wire.get("inPackets", 0)) - last_wire[0]
             last_wire = (int(wire.get("inPackets", 0)), int(wire.get("inBytes", 0)))
             peak = float(st.get("peakRms", 0))
@@ -316,6 +343,56 @@ class MeetAdapter:
         self.metrics.inc("meet_audio_frames_in")
         self._measure(pcm)
 
+    # ---- per-participant audio: one stream per person, named only when the evidence earns it --------------------------
+    def _pid_for_name(self, name: str) -> str:
+        """The participant id the engine already knows for this display name, or a stable one derived from it.
+
+        The first person in the room may be carrying the candidate's stream id rather than a name-derived one, so an exact match
+        wins; a name nobody has been seen under yet still gets a stable id instead of being dropped.
+        """
+        for pid, known in self._people.items():
+            if known == name:
+                return pid
+        return _pid(name)
+
+    def _on_self_name(self, name: str) -> None:
+        """Meet named the bot's own tile: pin it so the bot's glow can never be bound to a remote channel."""
+        self.binder.set_self_name(name)
+        self.on_status(f"the bot's own tile is {name!r}: it can never be attributed to a participant")
+        self.metrics.inc("meet_self_name_pinned")
+
+    def _on_glow(self, name: str, is_end: bool, ts_ms: int) -> None:
+        """One speaking edge from Meet's call screen. Raw signal: it never names a channel by itself."""
+        if self._closed:
+            return
+        self.binder.record_glow(name, is_end, float(ts_ms))
+        self.metrics.inc("meet_glow_edges")
+
+    def _on_channel_audio(self, channel: int, pcm: bytes, peak: float, ts_ms: int) -> None:
+        """One frame from one participant's own audio channel. The binder says who it is, or nobody."""
+        if self._closed or not pcm:
+            return
+        name = self.binder.name_for_channel(channel, float(ts_ms), peak)
+        if name is not None and self._bound.get(channel) != name:
+            self._bound[channel] = name
+            self.on_status(f"channel {channel} is {name}")           # the page numbers channels from 1, as `ch-<n>` does
+            self.metrics.inc("meet_channel_bound")
+        if not self.channels_active:
+            self.channels_active = True
+            self.on_status("per-participant audio is active: each participant's own channel is heard separately")
+            self.metrics.inc("meet_channels_active")
+        self.channel_frames += 1
+        stream_id = self._pid_for_name(name) if name is not None else f"ch-{channel}"
+        ts = int((time.monotonic() - self._t0) * 1000)
+        if self.recorder is not None:
+            self.recorder.write_room(pcm, IN_RATE, channel)         # each person's own file, never several channels in one track
+        if self.gain is not None:
+            pcm = self.gain.process(pcm)
+        pcm = self._gate_echo(pcm)
+        self._emit(MeetingEventKind.AUDIO, {"chunk": PCMChunk(pcm, IN_RATE, ts, stream_id)})
+        self.metrics.inc("meet_channel_frames_in")
+        self._measure(pcm)
+
     async def _pump_events(self) -> None:
         assert self.worker is not None
         while True:
@@ -374,7 +451,14 @@ class MeetAdapter:
         if len(self._people) == 1:
             self.on_status("One participant is in the meeting: audio is attributed to the candidate.")
         elif len(self._people) > 1:
-            self.on_status(f"{len(self._people)} participants: speakers cannot be told apart, so Tara will not run the interview.")
+            if self.per_participant and self.channels_active:
+                self.on_status(f"{len(self._people)} participants: each one's own channel is heard separately, so they are told apart "
+                               f"where Meet's speaking glow makes it unambiguous.")
+            elif self.per_participant:
+                self.on_status(f"{len(self._people)} participants: waiting for per-participant audio; until it starts they cannot be "
+                               f"told apart, so the interview stays quiet.")
+            else:
+                self.on_status(f"{len(self._people)} participants: speakers cannot be told apart, so Tara will not run the interview.")
         if self._people and not self._announced:
             self._announced = True
             if self.on_first_participant is not None:
@@ -387,6 +471,10 @@ class MeetAdapter:
         assert ev.state is not None
         if self.session is not None:
             self.session.state, self.session.detail = ev.state.value, ev.detail
+        if ev.state is State.RECONNECTING and self.per_participant:
+            self.binder.reset()                     # a new page numbers its channels from one again: old evidence is not evidence
+            self._bound.clear()
+            self.channels_active = False
         self.on_status(f"{ev.state.value}" + (f": {ev.detail}" if ev.detail else ""))
         if ev.state is State.IN_MEETING and ev.reconnected:
             self.metrics.inc("meet_reconnects")

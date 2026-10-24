@@ -10,7 +10,7 @@ from tara.core.errors import ConfigError, JoinError
 from tara.meet import selectors as sel
 from tara.meet.adapter import MeetAdapter
 from tara.meet.controller import DuplicateWorker, MeetController
-from tara.meet.worker import MeetWorker, State, WorkerConfig, parse_meet_link
+from tara.meet.worker import MeetWorker, State, WorkerConfig, WorkerEvent, parse_meet_link
 
 run = asyncio.run
 
@@ -461,6 +461,8 @@ def test_the_command_line_refuses_bad_input_without_opening_a_browser(tmp_path, 
     s = RuntimeSettings.from_env(env)
     assert run(join(s, "https://zoom.us/j/1", "alex", None)) == 2
     assert run(join(s, "abc-defg-hij", "nobody", None)) == 2 and "interview new" in capsys.readouterr().err
+    assert run(join(s, "abc-defg-hij", "", None, audio="devices", per_participant=True)) == 2       # page-only taps
+    assert "page audio route" in capsys.readouterr().err
     monkeypatch.delenv("TARA_CHROME_PATH", raising=False)
     assert check(s) in (0, 1) and "Bot profile folder" in capsys.readouterr().out
     off = RuntimeSettings.from_env({**env, "TARA_WORK_ENABLED": "0"})
@@ -503,13 +505,19 @@ def test_the_bot_says_when_it_hears_the_meeting_and_warns_when_the_audio_route_i
 def test_a_normal_meeting_needs_no_interview_and_answers_by_default():
     from tara.core.config import AppPolicy, Mode, Role, SpeakingPolicy
     from tara.core.config import validate as validate_config
-    from tara.meet.run import _meet_meeting, _parser
+    from tara.meet.run import _disclosure, _meet_meeting, _parser
     reply = _meet_meeting(reply_to_all=True)
     named = _meet_meeting(reply_to_all=False)
     assert reply.mode is Mode.NATURAL and reply.policy is SpeakingPolicy.PROACTIVE_ALLOWED and named.policy is SpeakingPolicy.ON_ADDRESS_ONLY
     assert all(not validate_config(c, AppPolicy()).errors() for c in (reply, named)) and reply.participants[0].role is Role.ORGANIZER
     args = _parser().parse_args(["join", "abc-defg-hij", "--address-only", "--transcripts"])
     assert args.interview == "" and args.address_only and args.transcripts and args.section
+    assert args.per_participant is False and _parser().parse_args(["join", "abc-defg-hij", "--per-participant"]).per_participant
+    # --record must never be announced to the meeting as "nothing is recorded"
+    plain = _meet_meeting(reply_to_all=True).disclosure_text
+    assert "Nothing is recorded" in _disclosure(plain, False)
+    said = _disclosure(plain, True)
+    assert "Nothing is recorded" not in said and "recorded on this computer" in said
 
 
 def test_icon_font_text_and_duplicates_are_not_people():
@@ -838,6 +846,21 @@ def test_recorder_writes_aligned_valid_wav_files_and_survives_failure(tmp_path):
     assert bad.failed and bad.write_tara(one_second, 16000) is None
 
 
+def test_recorder_keeps_one_file_per_participant_channel(tmp_path):
+    import wave
+
+    from tara.meet.recorder import MeetingRecorder
+    rec = MeetingRecorder(tmp_path / "c", "xyz", clock=lambda: 0.0)
+    rec.write_room(b"\x03\x00" * 8000, 16000, channel=1)       # per-participant capture: two people at once
+    rec.write_room(b"\x04\x00" * 4000, 16000, channel=2)
+    rec.close()
+    names = sorted(p.name for p in (tmp_path / "c").glob("*.wav"))
+    assert names == ["xyz-room-ch1.wav", "xyz-room-ch2.wav"]   # separate timelines, and no mixed room track was started
+    for name, frames in (("xyz-room-ch1.wav", 8000), ("xyz-room-ch2.wav", 4000)):
+        with wave.open(str(tmp_path / "c" / name)) as w:
+            assert w.getframerate() == 16000 and w.getnframes() == frames and w.getnchannels() == 1
+
+
 def test_the_worker_reports_who_is_talking_and_the_adapter_names_the_clear_speaker(tmp_path):
     async def go():
         page = FakePage([INCALL], names=["Sam", "Alex"])
@@ -875,3 +898,41 @@ def test_speaker_for_turn_is_time_weighted_and_unknown_without_evidence():
 def types_stub():
     from tara.meet.adapter import MeetAdapter
     return MeetAdapter.__new__(MeetAdapter)
+
+
+def test_per_participant_channels_are_named_only_when_the_glow_earns_it(tmp_path):
+    async def go():
+        page = FakePage([INCALL], names=["Alex Kim", "Sam"])
+        ad, ctrl, status = adapter_for(tmp_path, [page], interview_code="", per_participant=True, self_name="Tara")
+        await ad.join(MeetingTarget())
+        events: list = []
+        pump = asyncio.create_task(gather(ad, events))
+        for _ in range(40):
+            if len(ad._people) == 2:
+                break
+            await asyncio.sleep(0.05)
+        assert len(ad._people) == 2 and ad.capabilities.per_participant_audio is True
+        ad._on_self_name("Tara")                                          # the page named the bot's own tile
+        loud = b"\x10\x27" * 160                                          # one frame with a real peak (~0.3)
+        ad._on_channel_audio(1, loud, 0.3, 1000)                          # loud, but nothing is lit yet
+        await asyncio.sleep(0.01)
+        assert events[-1].payload["chunk"].stream_id == "ch-1"            # unknown, never a guess
+        for i in range(4):                                                # the glow agrees with this channel's energy
+            ad._on_glow("Alex Kim", False, 1000 + i * 10)
+            ad._on_channel_audio(1, loud, 0.3, 1000 + i * 10)
+        await asyncio.sleep(0.01)
+        assert events[-1].payload["chunk"].stream_id == "a"               # the id the engine already knows for that name
+        assert any("channel 1 is Alex Kim" in s for s in status) and ad.channels_active
+        ad._on_glow("Alex Kim", True, 1040)                               # Alex stops speaking
+        ad._on_glow("Tara", False, 1100)                                  # the bot's own tile never binds a remote channel
+        for i in range(4):
+            ad._on_channel_audio(2, loud, 0.3, 1100 + i * 10)
+        await asyncio.sleep(0.01)
+        assert events[-1].payload["chunk"].stream_id == "ch-2"
+        ad._on_state(WorkerEvent("state", state=State.RECONNECTING))       # a new page numbers its channels from one again
+        ad._on_channel_audio(1, loud, 0.3, 2000)
+        await asyncio.sleep(0.01)
+        assert events[-1].payload["chunk"].stream_id == "ch-1" and ad.binder.self_name == "Tara"
+        await ad.leave()
+        await pump
+    run(go())

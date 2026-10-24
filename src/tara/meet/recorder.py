@@ -2,7 +2,11 @@
 
 Two tracks, aligned to the same wall clock so they can be mixed later: `room` (what the meeting sounded like to Tara) and `tara`
 (her own voice). Files are plain 16-bit mono WAV under the work folder (git-ignored). Nothing is sent anywhere; a failure here
-disables the recorder and never touches the meeting."""
+disables the recorder and never touches the meeting.
+
+With per-participant capture the room audio arrives as several channels at once, and writing them into one track would interleave
+them into a timeline nobody spoke. Each channel therefore gets its own file (`...-room-ch1.wav`), on the same clock as the others.
+"""
 from __future__ import annotations
 
 import struct
@@ -10,6 +14,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
+
+MAX_CHANNEL_FILES = 64            # the bridge never reports more channels than this; a file per channel is bounded on purpose
 
 
 class _Track:
@@ -69,14 +75,27 @@ class MeetingRecorder:
         t0 = clock()
         self.room = _Track(folder / f"{name}-room.wav", clock, t0)
         self.tara = _Track(folder / f"{name}-tara.wav", clock, t0)
+        self.channels: dict[int, _Track] = {}          # per-participant room audio: one file per channel, same clock
         self.failed = ""
 
     @property
     def paths(self) -> tuple[Path, Path]:
         return self.room.path, self.tara.path
 
-    def write_room(self, pcm: bytes, rate: int) -> None:
-        self._safe(self.room, pcm, rate)
+    def write_room(self, pcm: bytes, rate: int, channel: int | None = None) -> None:
+        """Room audio. `channel` is set only by per-participant capture, and each channel is written to its own file."""
+        if channel is None:
+            self._safe(self.room, pcm, rate)
+            return
+        track = self.channels.get(channel)
+        if track is None:
+            if len(self.channels) >= MAX_CHANNEL_FILES:
+                self.failed = f"too many channels to record (limit {MAX_CHANNEL_FILES})"
+                return
+            base = self.room.path
+            track = self.channels[channel] = _Track(base.with_name(f"{base.stem}-ch{channel}{base.suffix}"), self.room.clock,
+                                                    self.room.t0)
+        self._safe(track, pcm, rate)
 
     def write_tara(self, pcm: bytes, rate: int) -> None:
         self._safe(self.tara, pcm, rate)
@@ -90,7 +109,7 @@ class MeetingRecorder:
             self.failed = f"{type(exc).__name__}: {exc}"
 
     def close(self) -> None:
-        for t in (self.room, self.tara):
+        for t in (self.room, self.tara, *self.channels.values()):
             try:
                 t.close()
             except Exception:  # noqa: BLE001

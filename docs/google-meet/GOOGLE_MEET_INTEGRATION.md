@@ -53,7 +53,7 @@ Each phase ends with a measured result, not a mock. A mock adapter proves nothin
 
 ### M3: Who said what (item 16)
 Order of evidence, strongest first, matching [PARTICIPANT_IDENTITY](../speakers/PARTICIPANT_IDENTITY.md):
-1. **Per-participant audio stream** from the adapter (the stream id is the evidence). Best case; diarization is skipped.
+1. **Per-participant audio stream** from the adapter (the stream id is the evidence). Best case; diarization is skipped. **First half built:** with `--per-participant` the Meet adapter taps one channel per participant and names it by energy ↔ glow correlation ([SPEAKER_BINDING](SPEAKER_BINDING.md)); unearned names stay `ch-<n>`. Unverified on the real Meet page, and the transcript path does not yet carry the per-turn speaker into reports.
 2. **Platform speaker events** (active speaker) combined with timing, if streams are mixed.
 3. **Diarization** of mixed audio ([SPEAKER_DIARIZATION](../speakers/SPEAKER_DIARIZATION.md); a candidate is pyannote, not selected, real-time use unproven) giving anonymous labels, then mapped to roster names by what people say ("this is Sam").
 4. **Otherwise `unknown`.** A wrong name is worse than none: individual interview reports and control commands stay gated on reliable identity.

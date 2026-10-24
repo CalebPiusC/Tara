@@ -137,7 +137,7 @@ class LiveVoiceEngine:
                  control: ControlState | None = None, memory_gate: MemoryWriteGate | None = None,
                  transcript_observers: tuple[Callable[[str, Attribution], None], ...] = (),
                  turn_observers: tuple[Callable[[TurnRecord], Awaitable[None] | None], ...] = ()):
-        self.session_id, self.scope, self.cfg, self.roles, self.names = session_id, scope, cfg, roles, names
+        self.session_id, self.scope, self.cfg, self.roles, self.names = session_id, scope, cfg, roles, dict(names)
         self.provider, self.session_config, self.adapter = provider, session_config, adapter
         self.participation, self.sessions, self.tools = participation, registry, tools
         self.metrics = metrics or Metrics()
@@ -295,10 +295,13 @@ class LiveVoiceEngine:
                 await self.on_meeting_audio(me.payload["chunk"])
             elif k is MeetingEventKind.PARTICIPANT_JOINED:
                 self.participants.join(me.payload["id"], me.payload["name"])
+                self.names[me.payload["id"]] = me.payload["name"]        # stream attribution resolves ids through this map
             elif k is MeetingEventKind.PARTICIPANT_LEFT:
                 self.participants.leave(me.payload["id"])
+                self.names.pop(me.payload["id"], None)
             elif k is MeetingEventKind.PARTICIPANT_RENAMED:
                 self.participants.rename(me.payload["id"], me.payload["name"])
+                self.names[me.payload["id"]] = me.payload["name"]
             elif k is MeetingEventKind.RECONNECTED:
                 await self._cancel_output("meeting_reconnected")   # speech in flight is never assumed delivered
             elif k is MeetingEventKind.ENDED:

@@ -30,7 +30,7 @@ flowchart LR
 
 ### The audio route (the hard part)
 Playwright cannot move audio, so the **page** does it, with no system audio device and no extra software:
-- **Meeting audio out:** a script injected before Meet loads wraps `RTCPeerConnection`. Every incoming audio track is tapped with Web Audio, mixed to mono, reduced from 48 kHz to 16 kHz PCM16 and sent to Python through an exposed function. Chrome runs with `--mute-audio`, so the bot machine does not play the meeting out loud; the taps are unaffected.
+- **Meeting audio out:** a script injected before Meet loads wraps `RTCPeerConnection`. Every incoming audio track is tapped with Web Audio, mixed to mono, reduced from 48 kHz to 16 kHz PCM16 and sent to Python through an exposed function. Chrome runs with `--mute-audio`, so the bot machine does not play the meeting out loud; the taps are unaffected. With `--per-participant` each participant's own media element is tapped as its own channel instead, and the mixed tap hands over for good on the first channel frame (see [SPEAKER_BINDING](SPEAKER_BINDING.md)).
 - **Tara's voice in:** `getUserMedia` is replaced. The "microphone" is a Web Audio destination that Python fills with Tara's 24 kHz speech chunks. Cancelling (barge-in) stops everything queued and reports how many milliseconds were actually played. No camera: a black frame is returned if video is asked for, and the worker also turns the camera off on the pre-join screen.
 - **Nothing is recorded or stored.** Audio is passed through and dropped. The only thing on disk is the bot's Chrome profile (its Google cookies), under `work/` which is git-ignored.
 
@@ -42,14 +42,17 @@ Alternatives considered: a virtual audio device such as BlackHole plus system au
 | `meet/controller.py` | link check (`parse`), sessions, one lock file per meeting so two workers never join the same one (stale locks replaced), `create_space` (explains what is missing) |
 | `meet/worker.py` | the state machine: launching, joining, waiting room, in meeting, reconnecting, ended, rejected, failed; joins the normal way, **waits to be admitted and never works around it**, rejoins a lost call a bounded number of times, leaves cleanly |
 | `meet/browser.py` | Playwright and installed Chrome (`channel="chrome"`, nothing downloaded); the page facade the worker uses |
-| `meet/bridge.js`, `meet/bridge.py` | the audio route above |
+| `meet/bridge.js`, `meet/bridge.py` | the audio route above, plus the opt-in per-participant channel taps and the speaking-glow scanner |
+| `meet/binding.py` | who said what: correlates a channel's energy with Meet's speaking glow, and refuses a name it cannot earn |
 | `meet/adapter.py` | turns worker events and bridge audio into the events the engine already reads, sends Tara's audio, supports stop |
 | `meet/selectors.py` | every label the bot looks for on Meet pages, in one place (unverified, see below) |
 | `meet/run.py` | `check`, `login`, `join` |
 | `voice/app.py` | small additions: `defer_opening` and `say_pending_opening`, so Tara greets when the candidate joins, not when she arrives |
 
 ### Who is the candidate
-Meet gives one mixed audio stream. For an interview with **exactly one other person** in the room, their audio is labelled as the candidate and the existing interview rules apply. With two or more other people the audio is labelled `mix`, which the engine treats as an unknown speaker, so the interview rules keep Tara quiet and the screen says so. Real per-person identity is part of M3 in [GOOGLE_MEET_INTEGRATION](GOOGLE_MEET_INTEGRATION.md).
+By default Meet gives one mixed audio stream. For an interview with **exactly one other person** in the room, their audio is labelled as the candidate and the existing interview rules apply. With two or more other people the audio is labelled `mix`, which the engine treats as an unknown speaker, so the interview rules keep Tara quiet and the screen says so.
+
+With `--per-participant` the bridge taps each participant's own media element instead and `meet/binding.py` correlates that channel's energy with Meet's speaking glow. A channel whose name is earned carries the participant's id; one that is not earned stays `ch-<n>`, which the engine treats as unknown. So two people become two labelled streams rather than one anonymous `mix`, and a name is never guessed. This is the first half of M3 and is **off by default** because it has not been run in a real Meet; see [SPEAKER_BINDING](SPEAKER_BINDING.md). Real per-person identity for the interview report is still M3 in [GOOGLE_MEET_INTEGRATION](GOOGLE_MEET_INTEGRATION.md).
 
 ### Interview behaviour in Meet
 Unchanged: the greeting and name check, one question at a time, semantic evaluation, one retry, the three-minute limit, the report. In Meet the opening is held until the candidate is in the room.
@@ -57,6 +60,7 @@ Unchanged: the greeting and name check, one question at a time, semantic evaluat
 ## What was verified and what was not
 **Verified (real Chrome 155 driving local pages, automated tests in `tests/meet/test_meet_browser.py`):**
 - meeting audio reaches Python as 16 kHz PCM with energy, attributed to the candidate for one person and to `mix` for two;
+- with `--per-participant`, two participants are heard on their own channels and named from Meet's speaking glow (`a` for the candidate, `p-sam` for the second person), the mixed tap stops for good once a channel carries the meeting, and the bot's own preview never becomes a channel;
 - Tara's speech comes out of the page as a microphone that a far side measures, ends when she finishes, and goes silent after a stop; the stop reports a plausible played time and a stopped utterance id stays stopped;
 - the waiting room is waited in, then entered when someone admits; a denial is reported as rejected; people joining and leaving become events; leaving frees the lock and closes the browser;
 - a dead browser page is replaced and audio resumes (`reconnected` event);
@@ -64,11 +68,14 @@ Unchanged: the greeting and name check, one question at a time, semantic evaluat
 
 **Verified offline without a browser (`tests/meet/test_meet_unit.py`):** link parsing, locks and duplicate prevention, the join and watch state machine (waiting-room timeout, denial, ended, not signed in, unknown screen, lost call and give-up), the adapter's attribution, ended-stream and cleanup behaviour, and the command-line refusals.
 
+**Verified offline without a browser (`tests/meet/test_binding.py`):** the speaker binder's rules — a name is attached only after enough agreeing evidence, near-ties and exact ties claim nobody, a quiet channel never earns a name, the bot's own tile is never bound, evidence decays, and bad input is refused. See [SPEAKER_BINDING](SPEAKER_BINDING.md).
+
 **Not verified:**
 - anything on the **real** Google Meet site: the selectors in `meet/selectors.py` are written from how Meet labels its controls and may not match today's page or the account's language; the stand-in page (`tests/meet/fixture.py`) only has controls with those same labels;
 - that Google lets an automated browser stay signed in, and that its page does not block or change the audio taps (the `RTCPeerConnection` wrap, `getUserMedia` replacement and the muted audio element);
 - real audio quality, delay and echo over a real call, and a real Gemini Live interview through the bridge;
 - people-list reading: Meet only shows the list while the People panel is open, and its markup is a guess;
+- **per-participant naming**: whether today's Meet still matches the tile selectors, `span.notranslate`, `data-self-name` and the speaking class names, and whether it really gives one media element per participant. If it does not, every channel stays `ch-<n>` (unknown), never wrong; nothing has been measured for cost or latency in a real call. See [SPEAKER_BINDING](SPEAKER_BINDING.md);
 - recovery from a real network drop, and a long (30 minute) meeting.
 
 ## Exact steps for the first real test
@@ -118,7 +125,7 @@ Every `meet join` writes `work/meet/last-run.log` (git-ignored, replaced each ru
 
 | Route | How | Needs | Status |
 |---|---|---|---|
-| `page` (default) | scripts inside the page tap incoming WebRTC audio, anything the page plays through its own audio context, and media elements; Tara's voice is a replaced microphone | nothing to install | works against the local stand-in in Chrome; on real Meet the standard WebRTC tap heard silence in four runs (decoded-sample counter stayed 0), so the two other taps were added and are untested on real Meet |
+| `page` (default) | scripts inside the page tap incoming WebRTC audio, anything the page plays through its own audio context, and media elements (and, with `--per-participant`, one channel per participant); Tara's voice is a replaced microphone | nothing to install | works against the local stand-in in Chrome; on real Meet the standard WebRTC tap heard silence in four runs (decoded-sample counter stayed 0), so the two other taps were added and are untested on real Meet. `--per-participant` is a page-side tap too, so it inherits that |
 | `devices` | Chrome's speaker is a virtual cable "BlackHole 2ch" that Tara reads; Chrome's microphone is a second cable "BlackHole 16ch" that Tara plays into | the two cables installed once | the route other open-source Meet bots use (web search, see SOURCES M7 to M9); cable handling and device mapping tested offline and with Chrome's fake device; **not run with real cables yet** |
 
 Devices mode: two cables, never one (a single loopback would feed the meeting back into itself). The cables are not the system default, so the rest of the Mac keeps its sound: the page's `enumerateDevices` is filtered to the two cables and any speaker choice Meet makes is forced to the meeting cable, and the microphone request is forced to the voice cable with echo cancellation and noise suppression off so her voice is not processed. `--mute-audio` is not used in this mode (it would silence the cable). Tara's mono voice is copied to both channels.
@@ -150,7 +157,7 @@ Another likely cause of repeated greetings and cut-off speech, with two devices 
 
 ## Limits and safety
 - Audio-first: no video is sent or read. The architecture leaves room for reading a shared screen later (a worker method that screenshots the page), but nothing of the kind exists.
-- No recording or persistence of meeting audio or video. If recording is ever added it needs consent and permission first.
+- Nothing is recorded unless `--record` is passed: then the room audio (one file per participant channel with `--per-participant`) and Tara's own voice are saved as WAV under `work/meet/recordings`, and the run tells you the folder so you can tell everyone in the meeting first. Nothing is uploaded.
 - Credentials: none in code or settings. The Google sign-in lives only in the bot's Chrome profile (`TARA_MEET_PROFILE_DIR`, default `work/meet/profile`, git-ignored). Treat that folder like a password.
 - The bot never approves itself, never bypasses the waiting room, and gives up (reported, not forced) if nobody admits it within `TARA_MEET_ADMIT_TIMEOUT_S`.
 - One worker per meeting: a lock file in `TARA_MEET_LOCK_DIR` stops an accidental second join (a stale lock from a dead process is replaced).

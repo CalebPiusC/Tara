@@ -4,12 +4,15 @@
     python -m tara.meet.run probe <link>               open the meeting page with the bot profile and report what is on screen; joins nothing
     python -m tara.meet.run login                      open Chrome with the bot's profile so YOU sign the bot's Google account in
     python -m tara.meet.run join <link>                join as Tara for a normal meeting (she answers when you speak)
+    python -m tara.meet.run join <link> --per-participant
+                                                       hear each participant on their own channel and name it from Meet's speaking glow
+                                                       (page audio route only; see docs/google-meet/SPEAKER_BINDING.md)
     python -m tara.meet.run join <link> --interview <code>
                                                        join as Tara, wait to be admitted, greet the candidate and interview
 
 An interview needs `TARA_WORK_ENABLED=1` and a code from `./dev.sh interview new`; a normal meeting needs neither. Tara waits in the meeting and starts
 speaking when the candidate joins; with more than one other person present she stays quiet and says so on screen, because speakers
-cannot be told apart in a mixed Meet stream. Nothing is recorded: audio is passed through and discarded.
+cannot be told apart in a mixed Meet stream. Nothing is recorded unless `--record` is given: audio is passed through and discarded.
 """
 from __future__ import annotations
 
@@ -135,6 +138,14 @@ def speaking_policy(people: int, mode: str):  # noqa: ANN201 - returns config.Sp
     return SpeakingPolicy.ON_ADDRESS_ONLY if people >= 2 else SpeakingPolicy.PROACTIVE_ALLOWED
 
 
+def _disclosure(text: str, record: bool) -> str:
+    """The AI-presence line the meeting is told. With `--record` it must never still say that nothing is recorded."""
+    if not record:
+        return text
+    note = "The meeting audio and Tara's voice are being recorded on this computer."
+    return text.replace("Nothing is recorded as audio or video.", note).strip() or note
+
+
 def _meet_meeting(reply_to_all: bool, wake_by_model: bool = False) -> MeetingConfig:
     """A normal meeting: the person in the room is the organizer. By default Tara answers any speech (right for a call with one
     person); with several people use address-only so she answers only when called by name."""
@@ -149,7 +160,8 @@ def _meet_meeting(reply_to_all: bool, wake_by_model: bool = False) -> MeetingCon
 
 async def join(settings: RuntimeSettings, link: str, code: str = "", headless: bool | None = None, *, section: str = "default",
                address_only: bool = False, transcripts: bool = False, audio: str = "", half_duplex: bool | None = None,
-               reply_to_all: bool = False, camera: bool = True, model_wake: bool = False, record: bool = False, gain: bool = True, follow_up_s: float = 8.0) -> int:
+               reply_to_all: bool = False, camera: bool = True, model_wake: bool = False, record: bool = False, gain: bool = True,
+               follow_up_s: float = 8.0, per_participant: bool = False) -> int:
     """Join as Tara. With an interview code she runs that interview; without one it is a normal meeting."""
     from ..core.config import AppPolicy, Role
     from ..core.config import validate as validate_config
@@ -191,6 +203,8 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
         extra = "\nCreate the interview first: ./dev.sh interview new \"Name\"  (see them: ./dev.sh interview list)" if interview else ""
         print(f"{exc}{extra}", file=sys.stderr)
         return 2
+    if record:
+        cfg = dataclasses.replace(cfg, disclosure_text=_disclosure(cfg.disclosure_text, record))
     if validate_config(cfg, AppPolicy()).errors():
         print("meeting configuration is invalid", file=sys.stderr)
         return 2
@@ -198,6 +212,10 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
     route = (audio or m.audio).lower()
     if route not in ("page", "devices"):
         print("--audio must be page or devices", file=sys.stderr)
+        return 2
+    if per_participant and route != "page":
+        print("--per-participant taps each participant's own media element, which only exists on the page audio route; it "
+              "cannot be used with --audio devices", file=sys.stderr)
         return 2
     devices_audio = None
     cables = None
@@ -243,7 +261,7 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("w", encoding="utf-8")
     log_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} meet run: meeting {meet_code}, interview={interview or 'none'}, "
-                   f"answers={answer_mode}, audio={route}, "
+                   f"answers={answer_mode}, audio={route}, per_participant={per_participant}, "
                    f"half_duplex={m.half_duplex if half_duplex is None else half_duplex}\n")
 
     def log_line(msg: str) -> None:
@@ -275,7 +293,7 @@ async def join(settings: RuntimeSettings, link: str, code: str = "", headless: b
                                 max_reconnects=m.reconnects, camera_on=bool(picture)),
         on_status=say, on_first_participant=greet, log=log_line, audio=devices_audio, cables=cables,
         half_duplex=m.half_duplex if half_duplex is None else half_duplex, on_people=people_changed, picture=picture, recorder=recorder,
-        gain=AdaptiveGain() if gain else None)
+        gain=AdaptiveGain() if gain else None, per_participant=per_participant, self_name=m.bot_name)
     bus = EventBus()
     app = LiveTaraApp(settings, cfg, roles, names, adapter, session_id=session_id, scope=scope, bus=bus, user_id="you",
                       interview_code=interview, defer_opening=bool(interview))
@@ -380,6 +398,9 @@ def _parser() -> argparse.ArgumentParser:
                    "her own voice come back from someone's speaker (use this when a phone or laptop speaker is being used); you cannot "
                    "interrupt her by voice")
     j.add_argument("--headless", action="store_true", default=None, help="no visible window (not recommended for first tests)")
+    j.add_argument("--per-participant", action="store_true", help="tap each participant's own audio channel and name it from Meet's "
+                   "speaking glow, so people are told apart instead of being heard as one unknown mix (see "
+                   "docs/google-meet/SPEAKER_BINDING.md); falls back to the mixed tap until a channel arrives")
     return p
 
 
@@ -397,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "probe":
             return asyncio.run(probe(settings, args.link))
         return asyncio.run(join(settings, args.link, args.interview, args.headless, section=args.section,
-                                address_only=args.address_only, transcripts=args.transcripts, audio=args.audio, half_duplex=args.half_duplex, reply_to_all=args.reply_to_all, camera=not args.no_camera, model_wake=args.model_wake, record=args.record, gain=not args.no_gain, follow_up_s=args.follow_up))
+                                address_only=args.address_only, transcripts=args.transcripts, audio=args.audio, half_duplex=args.half_duplex, reply_to_all=args.reply_to_all, camera=not args.no_camera, model_wake=args.model_wake, record=args.record, gain=not args.no_gain, follow_up_s=args.follow_up, per_participant=args.per_participant))
     except KeyboardInterrupt:
         return 130
 

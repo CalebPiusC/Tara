@@ -314,3 +314,53 @@ def test_devices_mode_hands_the_page_the_named_cable_and_taps_nothing(tmp_path):
         finally:
             await close()
     run(go())
+
+
+def test_per_participant_audio_names_each_speaker_from_the_glow(tmp_path):
+    """Each participant's own media element becomes its own channel; a name is attached only when the glow agrees over time.
+
+    This is the real-browser proof of docs/google-meet/SPEAKER_BINDING.md: two people are heard on two channels and told apart by
+    name, the candidate keeps the participant id the engine already knows, and the mixed tap hands over for good once a channel
+    carries the meeting (so nobody is heard twice).
+    """
+    async def go():
+        from tara.meet.bridge import AudioBridge
+        ad, ctrl, st = make_adapter(tmp_path, per_participant=True)
+        events: list = []
+        await ad.join(MeetingTarget(URL))
+        pump = asyncio.create_task(collect(ad, events))
+        try:
+            assert ad.capabilities.per_participant_audio is True
+            await fake(ad, "window.__fake.addSpeaker('Alex Kim')")
+            await until(lambda: any(e.kind is MeetingEventKind.PARTICIPANT_JOINED and e.payload["name"] == "Alex Kim" for e in events), 15)
+            await fake(ad, "() => { window.__fake.setGlow('Alex Kim', true); window.__fake.setSpeaker('Alex Kim', true); }")
+            # The channel taps take over the moment the page delivers one: from here the mixed stream must go silent for good.
+            await until(lambda: ad.channels_active and ad.bridge.channel_frames > 0, 25)
+            assert any("per-participant audio is active" in s for s in st)
+            bd = await AudioBridge.bind(page_of(ad))
+            assert bd["enabled"] and bd["channels"] >= 1 and bd["frames"] > 0 and bd["self"] == "Tara"
+            # The bot's own preview plays her microphone back; tapping it would be an echo of Tara, so it is never a channel.
+            await fake(ad, "() => { document.getElementById('call').appendChild(window.__fake.selfView); }")
+            await asyncio.sleep(1.6)
+            assert (await AudioBridge.bind(page_of(ad)))["channels"] == bd["channels"]
+            mark, mixed_at = len(events), ad.bridge.frames_in
+            # Alex is loud while his tile glows, so his own channel earns his name; the candidate keeps the id the engine knows.
+            await until(lambda: any(e.kind is MeetingEventKind.AUDIO and e.payload["chunk"].stream_id == "a"
+                                    and rms16(e.payload["chunk"].data) > 0.05 for e in events[mark:]), 25)
+            assert ad.bridge.frames_in == mixed_at                        # one-way handover: the mixed tap is off for good
+            await fake(ad, "() => { window.__fake.setGlow('Alex Kim', false); window.__fake.setSpeaker('Alex Kim', false); }")
+            await fake(ad, "window.__fake.addSpeaker('Sam')")
+            await until(lambda: any(e.kind is MeetingEventKind.PARTICIPANT_JOINED and e.payload["name"] == "Sam" for e in events), 15)
+            await fake(ad, "() => { window.__fake.setGlow('Sam', true); window.__fake.setSpeaker('Sam', true); }")
+            await until(lambda: any(e.kind is MeetingEventKind.AUDIO and e.payload["chunk"].stream_id == "p-sam"
+                                    and rms16(e.payload["chunk"].data) > 0.05 for e in events[mark:]), 25)
+            assert any("is Sam" in s for s in st)
+            # Two people, two channels, two names: this is what the mixed tap could never do.
+            heard = {e.payload["chunk"].stream_id for e in events[mark:]
+                     if e.kind is MeetingEventKind.AUDIO and rms16(e.payload["chunk"].data) > 0.05}
+            assert {"a", "p-sam"} <= heard
+            await fake(ad, "() => { window.__fake.setGlow('Sam', false); window.__fake.setSpeaker('Sam', false); }")
+        finally:
+            await ad.leave()
+            await pump
+    run(go())

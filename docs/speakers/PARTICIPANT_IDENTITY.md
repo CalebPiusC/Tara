@@ -2,6 +2,8 @@
 
 **Status: Designed, not implemented.**
 
+> **One part exists today, for Google Meet only.** The Meet adapter can tap one audio channel per participant and attach a name to a channel by correlating its energy with Meet's speaking glow ([SPEAKER_BINDING](../google-meet/SPEAKER_BINDING.md), opt-in `--per-participant`), and that binder is scored offline against hand-authored turns by the attribution ladder ([ATTRIBUTION_EVAL](../google-meet/ATTRIBUTION_EVAL.md)). That is concept 2 (audio stream identity) plus a single active-speaker hint, with `unknown` (`ch-<n>`) whenever the evidence is weak. Everything else on this page — diarization labels, confidence numbers, mapping versions, corrections and the interview-safety invariant — is still design, and the transcript path does not yet carry a per-turn speaker into reports.
+
 ## Seven separate concepts (never conflate)
 | # | Concept | Example | Source |
 |---|---|---|---|

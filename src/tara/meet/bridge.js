@@ -13,6 +13,14 @@
  *   element   media elements the page plays that are not already covered (for example MediaStream generators)
  * The webaudio and element routes are muted while Tara is speaking, so a page that monitors the microphone can never feed her own voice back.
  *
+ * PER-PARTICIPANT CHANNELS (window.__taraChannels === true, set by Python): Meet gives every remote participant its own media
+ * element with a live MediaStream, so the audio is already separated by person. Each such element becomes its own channel
+ * (index, 16 kHz PCM, per-frame peak) through window.__taraChannelAudio, and the speaking glow is reported separately through
+ * window.__taraGlow / window.__taraSelf. The name is NOT attached here: the two signals are correlated in Python
+ * (tara.meet.binding), so a name is only used when the evidence earns it. The mixed tap keeps working until the first channel
+ * frame arrives, then stops for good (one-way handover: nobody is ever heard twice).
+ * Ported from Vexa's gmeet-capture / gmeet-speakers (Apache-2.0); see docs/google-meet/SPEAKER_BINDING.md.
+ *
  * DEVICES MODE (window.__taraMode === "devices", set by Python before this script): the page is pointed at two real virtual audio cables
  * instead (docs/google-meet/GOOGLE_MEET_BOT.md). The page's speaker is forced to the meeting cable and its microphone to the voice cable; Python
  * moves the audio with the sound card API, so none of the taps below are used.
@@ -20,6 +28,7 @@
 (() => {
   if (window.__taraBridge) return;
   const MODE = window.__taraMode === "devices" ? "devices" : "page";
+  const CHANNELS = MODE !== "devices" && window.__taraChannels === true;   // one channel per remote participant (see the header)
   const DEV = window.__taraDevices || {};
   const S = { ctx: null, dest: null, mixer: null, proc: null, next: 0, firstStart: null, sources: new Set(),
               pcs: new Set(), holdUntil: 0, tapList: [], routes: {}, ownTrackIds: new Set(), rtcTrackIds: new Set(), wireLevel: 0, wirePeak: 0, taps: 0, remoteTracks: 0, inFrames: 0, inBytes: 0, outBytes: 0, lastInRms: 0, peakRms: 0, gumCalls: 0, errors: [] };
@@ -52,6 +61,7 @@
   }
 
   function onIn(e) {
+    if (CHANNELS && CH.active) return;                            // per-participant audio has taken over; never send both
     const inp = e.inputBuffer.getChannelData(0);
     const n = Math.floor(inp.length / 3);                         // 48 kHz -> 16 kHz by averaging three samples
     const out = new Int16Array(n); let sum = 0;
@@ -296,6 +306,160 @@
       r.level = m; if (m > r.peak) r.peak = m;
     }
   }, 100);
+
+  // ---- per-participant channels: one PCM stream per remote media element (identity is earned in Python, not here) ----
+  const CH = { byStream: new Map(), next: 1, frames: 0, active: false, lit: new Set(), self: null, reported: new Set(),
+               errors: [], timer: null, scanTimer: null, ctxs: new Set(), poll: 250, rescanMs: 750 };
+
+  const chNote = (msg) => { CH.errors.push(String(msg).slice(0, 160)); if (CH.errors.length > 20) CH.errors.shift(); note('channels: ' + msg); };
+
+  function chPeak(f) { let m = 0; for (let i = 0; i < f.length; i++) { const a = f[i] < 0 ? -f[i] : f[i]; if (a > m) m = a; } return m; }
+
+  // 16 kHz mono PCM16 out of an arbitrary-rate Float32 frame (only used when the context refuses 16 kHz).
+  function down16(f, rate) {
+    const ratio = rate / 16000, n = Math.max(1, Math.floor(f.length / ratio)), out = new Int16Array(n);
+    for (let i = 0; i < n; i++) {
+      const lo = Math.floor(i * ratio), hi = Math.min(f.length, Math.floor((i + 1) * ratio));
+      let sum = 0, k = 0;
+      for (let j = lo; j < hi; j++) { sum += f[j]; k++; }
+      const v = Math.max(-1, Math.min(1, k ? sum / k : 0));
+      out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    return out;
+  }
+
+  function chEmit(index, frame, rate) {
+    if (!frame || !frame.length) return;
+    const pcm = rate === 16000 ? (() => { const o = new Int16Array(frame.length);
+      for (let i = 0; i < frame.length; i++) { const v = Math.max(-1, Math.min(1, frame[i])); o[i] = v < 0 ? v * 0x8000 : v * 0x7fff; }
+      return o; })() : down16(frame, rate);
+    if (!pcm.length) return;
+    CH.frames++;
+    if (!CH.active) { CH.active = true; note('per-participant audio active: mixed tap stops here'); }
+    if (typeof window.__taraChannelAudio === "function") {
+      try { window.__taraChannelAudio(index, b64(pcm.buffer), chPeak(frame), Date.now()); } catch (e) { chNote('emit: ' + String(e)); }
+    }
+  }
+
+  const WORKLET = `class TaraPcmChannel extends AudioWorkletProcessor {
+    constructor() { super(); this._buf = new Float32Array(4096); this._n = 0; }
+    process(inputs) {
+      const ch = inputs[0] && inputs[0][0];
+      if (!ch) return true;
+      for (let i = 0; i < ch.length; i++) {
+        this._buf[this._n++] = ch[i];
+        if (this._n === 4096) { this.port.postMessage(this._buf); this._buf = new Float32Array(4096); this._n = 0; }
+      }
+      return true;
+    }
+  }
+  registerProcessor('tara-pcm-channel', TaraPcmChannel);`;
+
+  function chWorklet(c, src, index) {
+    // An AudioWorklet runs on the audio thread, so a busy Meet page cannot starve it into duplicated or dropped frames (the
+    // stutter a ScriptProcessor produces under load). Falls back to ScriptProcessor when the worklet cannot be loaded.
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+    return c.audioWorklet.addModule(url).then(() => {
+      URL.revokeObjectURL(url);
+      const node = new AudioWorkletNode(c, 'tara-pcm-channel', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+                                                                 channelCount: 1, channelCountMode: 'explicit' });
+      node.port.onmessage = (e) => chEmit(index, e.data, c.sampleRate);
+      return node;
+    }).catch((e) => { try { URL.revokeObjectURL(url); } catch (_) {} chNote('worklet: ' + String(e)); return chScript(c, src, index); });
+  }
+
+  function chScript(c, src, index) {
+    const node = c.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (e) => chEmit(index, e.inputBuffer.getChannelData(0), c.sampleRate);
+    return node;
+  }
+
+  function chConnect(el) {
+    let stream;
+    try { stream = el.srcObject; } catch (_) { return false; }
+    if (!(stream instanceof MediaStream) || !stream.getAudioTracks().length) return false;
+    if (el.__taraOwn || CH.byStream.has(stream.id)) return false;                     // our own sink, or already captured
+    if (stream.getAudioTracks().some((t) => S.ownTrackIds.has(t.id))) return false;   // Tara's own microphone: never a participant
+    const index = CH.next++;
+    try {
+      let c;
+      try { c = new AudioContext({ sampleRate: 16000 }); } catch (_) { c = new AudioContext(); }
+      if (c.state === "suspended") c.resume().catch(() => {});
+      const src = c.createMediaStreamSource(stream);
+      const sink = c.createGain(); sink.gain.value = 0;                               // keeps the graph pulled without any output
+      const wire = (node) => { src.connect(node); node.connect(sink); sink.connect(c.destination); };
+      if (c.audioWorklet) chWorklet(c, src, index).then(wire); else wire(chScript(c, src, index));
+      CH.byStream.set(stream.id, { index, ctx: c, el });
+      CH.ctxs.add(c);
+      const track = stream.getAudioTracks()[0];
+      track.addEventListener('ended', () => { try { c.close(); } catch (_) {} CH.byStream.delete(stream.id); CH.ctxs.delete(c); });
+      note(`channel ${index} connected (track ${track.id.substring(0, 8)})`);
+      return true;
+    } catch (e) { chNote(`channel ${index}: ` + String(e)); return false; }
+  }
+
+  function chScan() {
+    if (!CHANNELS || !document.querySelectorAll) return;
+    for (const el of document.querySelectorAll("audio,video")) { try { chConnect(el); } catch (_) {} }
+  }
+
+  // ---- the glow: who Meet renders as speaking (raw signal only; it never names a channel by itself) ----
+  const TILE_SELECTORS = ['div[data-participant-id]', '[data-participant-id]'];
+  const SPEAKING_CLASSES = ['Oaajhc', 'HX2H7', 'wEsLMd', 'OgVli',
+                            'speaking', 'active-speaker', 'speaker-active', 'speaking-indicator'];
+  const JUNK_NAME = /^Google Participant \(|spaces\/|devices\//;
+  const JUNK_PHRASES = ['let participants', 'send messages', 'turn on captions'];
+
+  function tileName(el) {
+    const nt = el.querySelector('span.notranslate');
+    let t = (nt && nt.textContent ? nt.textContent.trim() : '') || '';
+    if (!t) { const labeled = el.querySelector('[data-self-name]'); t = (labeled && labeled.getAttribute('data-self-name') || '').trim(); }
+    if (!t || t.length < 2 || t.length > 50) return null;
+    if (JUNK_NAME.test(t)) return null;
+    const lower = t.toLowerCase();
+    if (JUNK_PHRASES.some((p) => lower.includes(p))) return null;
+    return t;
+  }
+
+  function tileSpeaking(el) {
+    for (const cls of SPEAKING_CLASSES) {
+      try { if (el.classList.contains(cls) || el.querySelector('.' + CSS.escape(cls))) return true; } catch (_) {}
+    }
+    return false;
+  }
+
+  function glowScan() {
+    const lit = new Set();
+    const tiles = new Set();
+    for (const sel of TILE_SELECTORS) for (const el of document.querySelectorAll(sel)) tiles.add(el);
+    for (const el of tiles) {
+      const name = tileName(el);
+      if (!name) continue;
+      const self = el.hasAttribute('data-self-name') || !!el.querySelector('[data-self-name]');
+      if (self) {                                                                // the bot's own tile: pinned, never a channel
+        if (CH.self !== name) { CH.self = name; if (!CH.reported.has(name)) { CH.reported.add(name);
+          if (typeof window.__taraSelf === "function") { try { window.__taraSelf(name); } catch (_) {} } } }
+        continue;
+      }
+      if (tileSpeaking(el)) lit.add(name);
+    }
+    for (const name of lit) if (!CH.lit.has(name) && typeof window.__taraGlow === "function") { try { window.__taraGlow(name, false, Date.now()); } catch (_) {} }
+    for (const name of [...CH.lit]) if (!lit.has(name) && typeof window.__taraGlow === "function") { try { window.__taraGlow(name, true, Date.now()); } catch (_) {} }
+    CH.lit = lit;
+  }
+
+  if (CHANNELS) {
+    setTimeout(chScan, 500);
+    CH.scanTimer = setInterval(chScan, CH.rescanMs);
+    CH.timer = setInterval(glowScan, CH.poll);
+  }
+
+  // Diagnostics for the run log and the tests: how many channels, how many frames, who is lit, and whether a name was reported.
+  window.__taraBind = () => ({
+    enabled: CHANNELS, channels: CH.byStream.size, contexts: CH.ctxs.size, frames: CH.frames, active: CH.active,
+    lit: [...CH.lit], self: CH.self, errors: CH.errors.slice(-3),
+    streams: [...CH.byStream.values()].map((v) => ({ index: v.index, state: v.ctx.state })),
+  });
 
   window.__taraPlay = (data, rate) => {
     const c = ctx(); setGuard(true);                                 // silence the routes that could carry her own voice, immediately
